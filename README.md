@@ -1,5 +1,4 @@
-A caching Git HTTP server
-============================
+# A caching Git HTTP server
 
 Mirror remote repositories and serve them over HTTP, automatically updating
 them as needed.
@@ -8,7 +7,8 @@ Currently supported client operations are fetch and clone.  Authentication to
 the upstream repository is always enforced (for now, only HTTP Basic is
 supported), but public repositories can be used as well.
 
-# Usage
+
+## Usage
 
 ```
 Usage:
@@ -40,13 +40,46 @@ itself):.
 git config --global url."http://gitcache:1234/".insteadOf https://
 ```
 
-# Installing
 
-Requirements: `nodejs` and `git`.
+## Installation
+
+Requirements:
+
+- Git command line tools (including `git-upload-pack`)
+
+With the requirements installed, install git-cache-http-server from your package manager/registry of
+choice:
+
+- crates: `cargo install git-cache-http-server`
+
+If your package manager/registry of choice isn't listed, continue for instruction on building from
+source.
+
+
+## Building from source
+
+Requirements:
+
+- Git command line tools (including `git-upload-pack` and `git-http-backend`)
+- `cargo`, `rustc` (`rustup` is recommended)
+- `lightttpd` (for local integration tests)
+
+Clone the repository:
 
 ```
-npm install --global git-cache-http-server
+$ git clone https://github.com/jonasmalacofilho/git-cache-http-server
+$ cd git-cache-http-server
 ```
+
+Run the tests and build the server with optimizations.
+
+```
+$ cargo test
+$ cargo build --release
+```
+
+
+## Example systemd service file
 
 To install a cache service on Linux systems, check the example
 `doc/git-cache-http-server.service` unit file.
@@ -56,44 +89,29 @@ specifying a different than default port number or cache directory.  After
 installed in the proper Systemd unit path for your distribution:
 
 ```
-systemctl daemon-reload
-systemctl start git-cache-http-server
-systemctl enable git-cache-http-server
+# systemctl daemon-reload
+# systemctl start git-cache-http-server
+# systemctl enable git-cache-http-server
 ```
 
-# Working with the Haxe sources
 
-To modify the code or use the latest features and fixes, it is necessary to
-build the Haxe sources in `src/`.
+## Dealing with problems
 
-The process of installing Haxe, any additional dependencies, and building the
-project has been automated with the use of a `prepare` script, and should work
-transparently with the usual npm commands.  The resulting JS script will be
-placed in `bin/`.
+Environment variables available for the client:
 
-```
-# clone the repository (adjust the protocol)
-git clone https://github.com/jonasmalacofilho/git-cache-http-server
+- `GIT_TRACE`
+- `GIT_TRACE2`
+- `GIT_TRACE_PACKET`
+- `GIT_TRACE_CURL`
+- `GIT_TRACE_NO_DATA`
+- `GIT_CURL_VERBOSE`
 
-# install development dependencies and build the sources
-npm install
+Additional environment variables available for the server:
 
-# install the built code globally (might require sudo)
-npm install --global
-```
+- `RUST_LOG=<filter>`
 
-Additionally, the following scripts are available should there be a need to
-update the Haxe dependencies or quickly rebuild the Haxe code alone:
 
-```
-npm run installHaxelibs
-npm run build
-```
-
-Note: after upgrading it might be necessary to purge old `.haxelib` and
-`node_modules` directories, as well any remaining of old installations.
-
-# Implementation
+## The "smart" Git HTTP protocol
 
 The current implementation is somewhat oversimplified; any help in improving it
 is greatly appreciated!
