@@ -20,7 +20,9 @@ tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
 [dev-dependencies]
 http-body-util = "0.1.1"
 tower = "0.4.13"
+mockall = "0.12.1"
+tempfile = "3.10.1"
 
 [lints.rust]
-unused_imports = "allow"
-unused_variables = "allow"
+# unused_imports = "allow"
+# unused_variables = "allow"

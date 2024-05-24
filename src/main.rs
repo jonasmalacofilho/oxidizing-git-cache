@@ -1,10 +1,11 @@
 use std::io::Result;
 
-use clap::Parser;
 use tracing_subscriber::fmt::format::FmtSpan;
+use tracing_subscriber::EnvFilter;
+
+use clap::Parser;
 
 use git_cache_http_server::{start, Options};
-use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> Result<()> {

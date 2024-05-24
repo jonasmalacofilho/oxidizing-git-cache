@@ -1,27 +1,29 @@
 use std::io::Result;
-use std::marker::PhantomData;
 use std::path::PathBuf;
-use std::process::Stdio;
-use std::str::FromStr;
 use std::sync::Arc;
 
-use axum::{
-    body::Body,
-    extract::{Request, State},
-    handler::HandlerWithoutStateExt,
-    http::{Method, StatusCode, Uri},
-    response::{IntoResponse, Response},
-    routing::{any, get},
-    Router,
-};
-use clap::Parser;
-use git::{GitCli, GitOps, Repo};
-use serde::Deserialize;
-use tokio::{fs, io::AsyncReadExt, net::TcpListener};
+use axum::body::Body;
+use axum::extract::{Request, State};
+use axum::http::{Method, StatusCode, Uri};
+use axum::response::{IntoResponse, Response};
+use axum::routing::any;
+use axum::Router;
+
+use tokio::fs;
+use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::net::TcpListener;
 use tokio_util::io::ReaderStream;
+
 use tracing::{info, instrument};
 
+use clap::Parser;
+
 mod git;
+
+#[cfg(not(test))]
+use crate::git::Git;
+#[cfg(test)]
+use crate::git::MockGit as Git;
 
 /// A caching Git HTTP server.
 ///
@@ -40,7 +42,7 @@ pub struct Options {
 
 #[instrument(level = "debug", skip_all)]
 pub async fn start(options: &Options) -> Result<()> {
-    let app = app::<GitCli>(options).await?;
+    let app = app(options, Git::default()).await?;
 
     let listener = TcpListener::bind(("0.0.0.0", options.port)).await?;
     info!("Listening on {}", listener.local_addr()?);
@@ -48,22 +50,20 @@ pub async fn start(options: &Options) -> Result<()> {
     axum::serve(listener, app).await
 }
 
-struct Repos<G> {
+struct Repos {
     cache_dir: PathBuf,
-    _phantom: PhantomData<G>,
+    git: Arc<Git>,
 }
 
-impl<G: GitOps> Repos<G> {
-    fn new(cache_dir: PathBuf) -> Self {
-        Self {
-            cache_dir,
-            _phantom: PhantomData,
-        }
+impl Repos {
+    fn new(cache_dir: PathBuf, git: Arc<Git>) -> Self {
+        Self { cache_dir, git }
     }
 
-    fn open(&self, upstream: PathBuf) -> Repo<G> {
+    fn open(&self, upstream: PathBuf) -> Repo {
         // FIXME: upstream must be sanitized.
         Repo::new(
+            self.git.clone(),
             upstream.clone(),
             self.cache_dir
                 .join(upstream.strip_prefix("https://").unwrap()),
@@ -71,14 +71,34 @@ impl<G: GitOps> Repos<G> {
     }
 }
 
+pub struct Repo {
+    git: Arc<Git>,
+    upstream: PathBuf,
+    local: PathBuf,
+}
+
+impl Repo {
+    pub fn new(git: Arc<Git>, upstream: PathBuf, local: PathBuf) -> Self {
+        Self {
+            git,
+            upstream,
+            local,
+        }
+    }
+
+    pub fn advertise_refs(&mut self) -> Result<Box<dyn AsyncRead + Send + Sync + 'static>> {
+        self.git.advertise_refs(self.local.clone())
+    }
+}
+
 #[instrument(level = "debug", skip_all)]
-async fn app<G: GitOps>(options: &Options) -> Result<Router> {
+async fn app(options: &Options, git: Git) -> Result<Router> {
     // Ensure `cache_dir` exists and acquire a lock on it.
     fs::create_dir_all(&options.cache_dir).await?;
     fs::write(&options.cache_dir.join(".git-cache"), "").await?; // FIXME: lock
     info!("Cache directory is {:?}", options.cache_dir);
 
-    let repos: Repos<G> = Repos::new(options.cache_dir.clone());
+    let repos = Repos::new(options.cache_dir.clone(), Arc::new(git));
 
     Ok(Router::new()
         .route("/*req", any(router))
@@ -86,7 +106,7 @@ async fn app<G: GitOps>(options: &Options) -> Result<Router> {
 }
 
 #[instrument(level = "debug", skip_all)]
-async fn router<G: GitOps>(State(repos): State<Arc<Repos<G>>>, request: Request<Body>) -> Response {
+async fn router(State(repos): State<Arc<Repos>>, request: Request<Body>) -> Response {
     // TODO: handle missing scheme; use http (localhost) or https (else)
     let enclosed_uri: Uri = request.uri().to_string()[1..].parse().unwrap();
 
@@ -118,13 +138,13 @@ async fn router<G: GitOps>(State(repos): State<Arc<Repos<G>>>, request: Request<
 }
 
 #[instrument(level = "debug", skip(repo))]
-async fn handle_ref_discovery<G: GitOps>(mut repo: Repo<G>) -> Response {
+async fn handle_ref_discovery(mut repo: Repo) -> Response {
     // TODO: update
 
     // TODO: serve
     // TODO: enable kill on drop
 
-    let stdout = repo.advertise_refs().unwrap(); // FIXME: unwrap
+    let stdout = Box::into_pin(repo.advertise_refs().unwrap()); // FIXME: unwrap
     let body = b"001e# service=git-upload-pack\n0000".chain(stdout);
     let stream = ReaderStream::new(body);
 
@@ -149,20 +169,32 @@ async fn handle_upload_pack() -> Response {
 
 #[cfg(test)]
 mod unit_tests {
+    use std::env::temp_dir;
+
     use http_body_util::BodyExt;
-    use std::net::SocketAddr;
     use tower::ServiceExt;
 
     use super::*;
-    use crate::git::GitMock;
 
     #[tokio::test]
     async fn ref_discovery() {
-        // FIXME: use single-use temporary dirs.
-        let app = app::<GitMock>(&Options {
-            cache_dir: "/tmp/git-cache-test-unit-tests".into(),
-            port: 0,
-        })
+        let cache_dir = temp_dir();
+        let repo_dir = cache_dir.join("example.com/a/b/c");
+
+        let mut mock_git = Git::default();
+        mock_git
+            .expect_advertise_refs()
+            .withf(move |local| local == &repo_dir)
+            .times(1)
+            .returning(|_local| Ok(Box::new("mock git-upload-pack output".as_bytes())));
+
+        let app = app(
+            &Options {
+                cache_dir: cache_dir.clone(),
+                port: 0,
+            },
+            mock_git,
+        )
         .await
         .unwrap();
 
@@ -183,16 +215,8 @@ mod unit_tests {
                 .headers()
                 .get_all("content-type")
                 .into_iter()
-                .count(),
-            1
-        );
-        assert_eq!(
-            response.headers().get("content-type"),
-            Some(
-                &"application/x-git-upload-pack-advertisement"
-                    .parse()
-                    .unwrap()
-            )
+                .collect::<Vec<_>>(),
+            ["application/x-git-upload-pack-advertisement"]
         );
 
         assert_eq!(
@@ -200,17 +224,12 @@ mod unit_tests {
                 .headers()
                 .get_all("cache-control")
                 .into_iter()
-                .count(),
-            1
-        );
-        assert_eq!(
-            response.headers().get("cache-control"),
-            Some(&"no-cache".parse().unwrap())
+                .collect::<Vec<_>>(),
+            ["no-cache"]
         );
 
-        let body = response.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(
-            body,
+            response.into_body().collect().await.unwrap().to_bytes(),
             "001e# service=git-upload-pack\n0000mock git-upload-pack output"
         );
     }
