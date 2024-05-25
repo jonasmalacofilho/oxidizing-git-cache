@@ -44,6 +44,7 @@ impl Git {
         local: PathBuf,
     ) -> Result<Box<dyn AsyncRead + Send + Sync + 'static>> {
         // TODO: enable kill on drop (prob. requires returning the child)
+        // TODO: try to unbox
         let mut child = Command::new("git-upload-pack")
             .arg("--stateless-rpc")
             .arg("--http-backend-info-refs")

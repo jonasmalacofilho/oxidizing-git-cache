@@ -185,9 +185,17 @@ mod unit_tests {
     use http_body_util::BodyExt;
     use mockall::predicate::eq;
     use tempfile::tempdir;
-    use tower::ServiceExt;
+    use tower::{Service, ServiceExt};
 
     use super::*;
+
+    fn default_output() -> Result<Output> {
+        Ok(Output {
+            status: ExitStatus::default(),
+            stdout: vec![],
+            stderr: vec![],
+        })
+    }
 
     #[tokio::test]
     async fn ref_discovery_new_repo() {
@@ -198,17 +206,13 @@ mod unit_tests {
 
         let mut mock_git = Git::default();
 
+        // TODO: check sequence of git ops?
+
         mock_git
             .expect_init()
             .with(eq(config.cache_dir.join("example.com/a/b/c.git")))
             .times(1)
-            .return_once(move |_| {
-                Ok(Output {
-                    status: ExitStatus::default(),
-                    stdout: vec![],
-                    stderr: vec![],
-                })
-            });
+            .returning(|_| default_output());
 
         mock_git
             .expect_fetch()
@@ -217,13 +221,7 @@ mod unit_tests {
                 eq(config.cache_dir.join("example.com/a/b/c.git")),
             )
             .times(1)
-            .return_once(move |_, _| {
-                Ok(Output {
-                    status: ExitStatus::default(),
-                    stdout: vec![],
-                    stderr: vec![],
-                })
-            });
+            .returning(|_, _| default_output());
 
         mock_git
             .expect_advertise_refs()
@@ -235,8 +233,7 @@ mod unit_tests {
 
         let response = app
             .oneshot(
-                Request::builder()
-                    .uri("/example.com/a/b/c/info/refs?service=git-upload-pack")
+                Request::get("/example.com/a/b/c/info/refs?service=git-upload-pack")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -262,9 +259,57 @@ mod unit_tests {
     }
 
     #[tokio::test]
-    #[ignore]
     async fn ref_discovery_existing_repo() {
-        todo!()
+        // NOTE: Assumes that basic ref discovery of a new repo has passed its tests.
+
+        let config = Options {
+            cache_dir: tempdir().unwrap().into_path(),
+            port: 0,
+        };
+
+        let mut mock_git = Git::default();
+
+        // TODO: check sequence of git ops?
+
+        mock_git
+            .expect_init()
+            .times(2)
+            .returning(|_| default_output());
+
+        mock_git
+            .expect_fetch()
+            .times(2)
+            .returning(|_, _| default_output());
+
+        mock_git
+            .expect_advertise_refs()
+            .times(2)
+            .returning(|_| Ok(Box::new("mock git-upload-pack output".as_bytes())));
+
+        let mut app = app(&config, mock_git).await.unwrap();
+
+        // Can't clone Request because axum::body::Body isn't Clone.
+
+        let clone = app
+            .call(
+                Request::get("/example.com/a/b/c/info/refs?service=git-upload-pack")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let fetch = app
+            .oneshot(
+                Request::get("/example.com/a/b/c/info/refs?service=git-upload-pack")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(clone.status(), StatusCode::OK);
+        assert_eq!(fetch.status(), StatusCode::OK);
     }
 
     #[test]
