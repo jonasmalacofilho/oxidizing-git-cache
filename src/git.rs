@@ -15,17 +15,14 @@ pub struct Git {}
 #[cfg_attr(test, automock, allow(dead_code))]
 impl Git {
     pub async fn clone_repo(&self, upstream: Uri, local: PathBuf) -> Result<Output> {
-        // Ensure the parent directory exists.
-        //fs::create_dir_all(&dbg!(local.parent().unwrap())).await?;
-
         // TODO: store stdout/stderr and log/return on errors
-        let child = dbg!(Command::new("git")
+        let child = Command::new("git")
             .arg("clone")
             .arg("--quiet")
             .arg("--mirror")
             .arg(upstream.to_string())
-            .arg(local))
-        .spawn()?;
+            .arg(local)
+            .spawn()?;
         child.wait_with_output().await
     }
 
@@ -36,7 +33,7 @@ impl Git {
         // TODO: enable kill on drop (prob. requires returning the child)
         let mut child = Command::new("git-upload-pack")
             .arg("--stateless-rpc")
-            .arg("--advertise-refs")
+            .arg("--http-backend-info-refs")
             .arg(local) // FIXME bytes or path?
             .stdout(Stdio::piped())
             .spawn()?;
