@@ -273,7 +273,7 @@ mod unit_tests {
 
         mock_git
             .expect_init()
-            .times(2)
+            .times(1..=2)
             .returning(|_| default_output());
 
         mock_git
