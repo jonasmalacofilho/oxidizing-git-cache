@@ -13,7 +13,7 @@ async fn main() -> Result<()> {
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
-        .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE) // FIXME only if level >= debug or trace
+        .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE) // FIXME: only if level >= debug or trace
         .compact()
         .init();
 

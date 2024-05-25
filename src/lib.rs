@@ -76,8 +76,8 @@ impl Repos {
             .with_extension("git");
 
         // TODO: avoid doing this everytime
-        fs::create_dir_all(&local).await.expect("FIXME");
-        self.git.init(local.clone()).await.expect("FIXME");
+        fs::create_dir_all(&local).await.unwrap();
+        self.git.init(local.clone()).await.unwrap();
 
         Repo {
             git: self.git.clone(),
@@ -97,7 +97,6 @@ pub struct Repo {
 impl Repo {
     #[instrument(level = "debug", skip_all)]
     pub async fn fetch(&mut self) -> Result<Output> {
-        // TODO: supply authentication
         self.git
             .fetch(self.upstream.clone(), self.local.clone())
             .await
@@ -151,11 +150,11 @@ async fn router(State(repos): State<Arc<Repos>>, request: Request<Body>) -> Resp
 
 #[instrument(level = "debug", ret)]
 async fn handle_ref_discovery(mut repo: Repo) -> Response {
-    // TODO: authenticate
-    // FIXME: return http error on unsuccessful git-clone
+    // TODO: validate & authenticate on upstream, and appropriately reply to client
+
+    // TODO: supply authentication
     repo.fetch().await.unwrap();
 
-    // FIXME: return http error on unsuccessful git-upload-pack
     let stdout = Box::into_pin(repo.advertise_refs().unwrap());
     let body = b"001e# service=git-upload-pack\n0000".chain(stdout);
     let stream = ReaderStream::new(body);

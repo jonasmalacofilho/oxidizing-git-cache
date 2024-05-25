@@ -34,7 +34,7 @@ impl Git {
             .arg("--quiet")
             .arg("--prune-tags")
             .arg(upstream.to_string())
-            .arg("+refs/*:refs/*") // TODO: document
+            .arg("+refs/*:refs/*") // Map all upstream refs to local refs.
             .spawn()?;
         child.wait_with_output().await
     }
@@ -47,9 +47,11 @@ impl Git {
         let mut child = Command::new("git-upload-pack")
             .arg("--stateless-rpc")
             .arg("--http-backend-info-refs")
-            .arg(local) // FIXME bytes or path?
+            .arg(local)
             .stdout(Stdio::piped())
             .spawn()?;
-        Ok(Box::new(child.stdout.take().unwrap())) // FIXME (or not) unwrap
+        Ok(Box::new(
+            child.stdout.take().expect("stdout should be piped"),
+        ))
     }
 }
