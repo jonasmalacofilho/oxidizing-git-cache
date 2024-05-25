@@ -1,5 +1,6 @@
 use std::io::Result;
 use std::path::PathBuf;
+use std::process::Output;
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -50,6 +51,7 @@ pub async fn start(options: &Options) -> Result<()> {
     axum::serve(listener, app).await
 }
 
+#[derive(Debug)]
 struct Repos {
     cache_dir: PathBuf,
     git: Arc<Git>,
@@ -60,32 +62,37 @@ impl Repos {
         Self { cache_dir, git }
     }
 
-    fn open(&self, upstream: PathBuf) -> Repo {
-        // FIXME: upstream must be sanitized.
-        Repo::new(
-            self.git.clone(),
-            upstream.clone(),
-            self.cache_dir
-                .join(upstream.strip_prefix("https://").unwrap()),
-        )
+    #[instrument(level = "debug", skip_all)]
+    fn open(&self, upstream: Uri) -> Repo {
+        // FIXME: upstream must be sanitized
+        // NOTE: beware of components that look like absolute paths when using `join`
+        Repo {
+            git: self.git.clone(),
+            upstream: upstream.clone(),
+            local: self
+                .cache_dir
+                .join(upstream.host().unwrap())
+                .join(&upstream.path()[1..]),
+        }
     }
 }
 
+#[derive(Debug)]
 pub struct Repo {
     git: Arc<Git>,
-    upstream: PathBuf,
+    upstream: Uri,
     local: PathBuf,
 }
 
 impl Repo {
-    pub fn new(git: Arc<Git>, upstream: PathBuf, local: PathBuf) -> Self {
-        Self {
-            git,
-            upstream,
-            local,
-        }
+    #[instrument(level = "debug", skip_all)]
+    pub async fn clone(&mut self) -> Result<Output> {
+        self.git
+            .clone_repo(self.upstream.clone(), self.local.clone())
+            .await
     }
 
+    #[instrument(level = "debug", skip_all)]
     pub fn advertise_refs(&mut self) -> Result<Box<dyn AsyncRead + Send + Sync + 'static>> {
         self.git.advertise_refs(self.local.clone())
     }
@@ -107,29 +114,23 @@ async fn app(options: &Options, git: Git) -> Result<Router> {
 
 #[instrument(level = "debug", skip_all)]
 async fn router(State(repos): State<Arc<Repos>>, request: Request<Body>) -> Response {
-    // TODO: handle missing scheme; use http (localhost) or https (else)
-    let enclosed_uri: Uri = request.uri().to_string()[1..].parse().unwrap();
+    let uri = request.uri();
 
-    if enclosed_uri.query() != Some("service=git-upload-pack") {
+    if uri.query() != Some("service=git-upload-pack") {
         return StatusCode::NOT_FOUND.into_response();
     }
 
-    // Only `git-upload-pack` (`clone` and `fetch` operations) is currently supported.
-    let path = enclosed_uri.path();
-
     // TODO: extract authentication
 
-    if request.method() == Method::GET && path.ends_with("/info/refs") {
+    if request.method() == Method::GET {
         // "Smart" protocol client step 1: ref discovery.
-        let upstream = enclosed_uri
-            .to_string()
-            .strip_suffix("/info/refs?service=git-upload-pack")
-            .unwrap()
-            .to_string(); // FIXME: untyped mess
-
-        let repo = repos.open(upstream.into());
+        let Some(upstream) = uri.path().strip_suffix("/info/refs") else {
+            todo!("handle {uri}")
+        };
+        let upstream: Uri = format!("https:/{}", upstream).parse().unwrap();
+        let repo = repos.open(upstream);
         handle_ref_discovery(repo).await
-    } else if request.method() == Method::POST && path.ends_with("/git-upload-pack") {
+    } else if request.method() == Method::POST && uri.path().ends_with("/git-upload-pack") {
         // "Smart" protocol client step 2: compute.
         handle_upload_pack().await
     } else {
@@ -137,14 +138,17 @@ async fn router(State(repos): State<Arc<Repos>>, request: Request<Body>) -> Resp
     }
 }
 
-#[instrument(level = "debug", skip(repo))]
+#[instrument(level = "debug", ret)]
 async fn handle_ref_discovery(mut repo: Repo) -> Response {
-    // TODO: update
+    // TODO: authenticate
+    // TODO: update local copy with git-fetch
+    // TODO: use git-fetch for everything, including the initial "clone"
 
-    // TODO: serve
-    // TODO: enable kill on drop
+    // FIXME: return http error on unsuccessful git-clone
+    repo.clone().await.unwrap();
 
-    let stdout = Box::into_pin(repo.advertise_refs().unwrap()); // FIXME: unwrap
+    // FIXME: return http error on unsuccessful git-upload-pack
+    let stdout = Box::into_pin(repo.advertise_refs().unwrap());
     let body = b"001e# service=git-upload-pack\n0000".chain(stdout);
     let stream = ReaderStream::new(body);
 
@@ -169,39 +173,51 @@ async fn handle_upload_pack() -> Response {
 
 #[cfg(test)]
 mod unit_tests {
-    use std::env::temp_dir;
+    use std::process::ExitStatus;
 
     use http_body_util::BodyExt;
+    use mockall::predicate::eq;
+    use tempfile::tempdir;
     use tower::ServiceExt;
 
     use super::*;
 
     #[tokio::test]
-    async fn ref_discovery() {
-        let cache_dir = temp_dir();
-        let repo_dir = cache_dir.join("example.com/a/b/c");
+    async fn ref_discovery_new_repo() {
+        let config = Options {
+            cache_dir: tempdir().unwrap().into_path(),
+            port: 0,
+        };
 
         let mut mock_git = Git::default();
+
+        mock_git
+            .expect_clone_repo()
+            .with(
+                eq(Uri::from_static("https://example.com/a/b/c")),
+                eq(config.cache_dir.join("example.com/a/b/c")),
+            )
+            .times(1)
+            .return_once(move |_, _| {
+                Ok(Output {
+                    status: ExitStatus::default(),
+                    stdout: vec![],
+                    stderr: vec![],
+                })
+            });
+
         mock_git
             .expect_advertise_refs()
-            .withf(move |local| local == &repo_dir)
+            .with(eq(config.cache_dir.join("example.com/a/b/c")))
             .times(1)
-            .returning(|_local| Ok(Box::new("mock git-upload-pack output".as_bytes())));
+            .returning(|_| Ok(Box::new("mock git-upload-pack output".as_bytes())));
 
-        let app = app(
-            &Options {
-                cache_dir: cache_dir.clone(),
-                port: 0,
-            },
-            mock_git,
-        )
-        .await
-        .unwrap();
+        let app = app(&config, mock_git).await.unwrap();
 
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri("/https://example.com/a/b/c/info/refs?service=git-upload-pack")
+                    .uri("/example.com/a/b/c/info/refs?service=git-upload-pack")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -211,20 +227,12 @@ mod unit_tests {
         assert_eq!(response.status(), StatusCode::OK);
 
         assert_eq!(
-            response
-                .headers()
-                .get_all("content-type")
-                .into_iter()
-                .collect::<Vec<_>>(),
+            Vec::from_iter(response.headers().get_all("content-type").into_iter()),
             ["application/x-git-upload-pack-advertisement"]
         );
 
         assert_eq!(
-            response
-                .headers()
-                .get_all("cache-control")
-                .into_iter()
-                .collect::<Vec<_>>(),
+            Vec::from_iter(response.headers().get_all("cache-control").into_iter()),
             ["no-cache"]
         );
 
@@ -234,15 +242,21 @@ mod unit_tests {
         );
     }
 
+    #[tokio::test]
+    #[ignore]
+    async fn ref_discovery_existing_repo() {
+        todo!()
+    }
+
     #[test]
     #[ignore]
     fn upload_pack() {
-        assert!(false);
+        todo!()
     }
 
     #[test]
     #[ignore]
     fn authentication() {
-        assert!(false);
+        todo!()
     }
 }
