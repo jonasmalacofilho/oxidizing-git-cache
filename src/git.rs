@@ -14,14 +14,27 @@ pub struct Git {}
 
 #[cfg_attr(test, automock, allow(dead_code))]
 impl Git {
-    pub async fn clone_repo(&self, upstream: Uri, local: PathBuf) -> Result<Output> {
+    pub async fn init(&self, local: PathBuf) -> Result<Output> {
+        let child = Command::new("git")
+            .arg("init")
+            .arg("--quiet")
+            .arg("--bare")
+            .arg(local)
+            .spawn()?;
+        child.wait_with_output().await
+    }
+
+    pub async fn fetch(&self, upstream: Uri, local: PathBuf) -> Result<Output> {
+        // TODO: set up authentication
         // TODO: store stdout/stderr and log/return on errors
         let child = Command::new("git")
-            .arg("clone")
-            .arg("--quiet")
-            .arg("--mirror")
-            .arg(upstream.to_string())
+            .arg("-C")
             .arg(local)
+            .arg("fetch")
+            .arg("--quiet")
+            .arg("--prune-tags")
+            .arg(upstream.to_string())
+            .arg("+refs/*:refs/*") // TODO: document
             .spawn()?;
         child.wait_with_output().await
     }
