@@ -3,14 +3,17 @@ use std::path::PathBuf;
 use std::process::{Output, Stdio};
 
 use axum::http::Uri;
-use tokio::io::AsyncRead;
-use tokio::process::Command;
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::process::{Command};
 
 #[cfg(test)]
 use mockall::automock;
 
 #[derive(Default, Debug)]
 pub struct Git {}
+
+type AsyncInput = Box<dyn AsyncWrite + Send + Sync + 'static>;
+type AsyncOutput = Box<dyn AsyncRead + Send + Sync + 'static>;
 
 #[cfg_attr(test, automock, allow(dead_code))]
 impl Git {
@@ -39,16 +42,27 @@ impl Git {
         child.wait_with_output().await
     }
 
-    pub fn advertise_refs(
-        &self,
-        local: PathBuf,
-    ) -> Result<Box<dyn AsyncRead + Send + Sync + 'static>> {
+    pub fn advertise_refs(&self, local: PathBuf) -> Result<AsyncOutput> {
         // TODO: enable kill on drop (prob. requires returning the child)
         // TODO: try to unbox
         let mut child = Command::new("git-upload-pack")
             .arg("--stateless-rpc")
             .arg("--http-backend-info-refs")
             .arg(local)
+            .stdout(Stdio::piped())
+            .spawn()?;
+        Ok(Box::new(
+            child.stdout.take().expect("stdout should be piped"),
+        ))
+    }
+
+    pub fn upload_pack(&self, local: PathBuf) -> Result<AsyncOutput> {
+        // TODO: enable kill on drop (prob. requires returning the child)
+        // TODO: try to unbox
+        let mut child = Command::new("git-upload-pack")
+            .arg("--stateless-rpc")
+            .arg(local)
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()?;
         Ok(Box::new(

@@ -1,7 +1,14 @@
-use std::io::Result;
+use std::io::{Error, ErrorKind, Result};
 use std::path::PathBuf;
 use std::process::Output;
 use std::sync::Arc;
+
+use futures_util::stream::TryStreamExt;
+
+use tokio::fs;
+use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::net::TcpListener;
+use tokio_util::io::{ReaderStream, StreamReader};
 
 use axum::body::Body;
 use axum::extract::{Request, State};
@@ -9,11 +16,6 @@ use axum::http::{Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
 use axum::Router;
-
-use tokio::fs;
-use tokio::io::{AsyncRead, AsyncReadExt};
-use tokio::net::TcpListener;
-use tokio_util::io::ReaderStream;
 
 use tracing::{info, instrument};
 
@@ -69,20 +71,14 @@ impl Repos {
         // - upstreams that turn into subpaths of existing cached repos
         // - upstreams that result in absolute-looking paths being feed into Path::join
 
-        let local = self
-            .cache_dir
-            .join(upstream.host().unwrap())
-            .join(&upstream.path()[1..])
-            .with_extension("git");
-
-        // TODO: avoid doing this everytime
-        fs::create_dir_all(&local).await.unwrap();
-        self.git.init(local.clone()).await.unwrap();
-
         Repo {
             git: self.git.clone(),
             upstream: upstream.clone(),
-            local,
+            local: self
+                .cache_dir
+                .join(upstream.host().unwrap())
+                .join(&upstream.path()[1..])
+                .with_extension("git"),
         }
     }
 }
@@ -96,6 +92,14 @@ pub struct Repo {
 
 impl Repo {
     #[instrument(level = "debug", skip_all)]
+    pub async fn ensure_init(&mut self) -> Result<()> {
+        // TODO: avoid doing this everytime
+        fs::create_dir_all(&self.local).await?;
+        let _ = self.git.init(self.local.clone()).await;
+        Ok(())
+    }
+
+    #[instrument(level = "debug", skip_all)]
     pub async fn fetch(&mut self) -> Result<Output> {
         self.git
             .fetch(self.upstream.clone(), self.local.clone())
@@ -105,6 +109,12 @@ impl Repo {
     #[instrument(level = "debug", skip_all)]
     pub fn advertise_refs(&mut self) -> Result<Box<dyn AsyncRead + Send + Sync + 'static>> {
         self.git.advertise_refs(self.local.clone())
+    }
+
+    #[instrument(level = "debug", skip_all)]
+    pub fn upload_pack(&mut self) -> Result<Box<dyn AsyncRead + Send + Sync + 'static>> {
+        // FIXME: do something with input
+        self.git.upload_pack(self.local.clone())
     }
 }
 
@@ -124,25 +134,35 @@ async fn app(options: &Options, git: Git) -> Result<Router> {
 
 #[instrument(level = "debug", skip_all)]
 async fn router(State(repos): State<Arc<Repos>>, request: Request<Body>) -> Response {
-    let uri = request.uri();
-
-    if uri.query() != Some("service=git-upload-pack") {
-        return StatusCode::NOT_FOUND.into_response();
-    }
-
-    // TODO: extract authentication
+    // TODO: extract credentials
 
     if request.method() == Method::GET {
         // "Smart" protocol client step 1: ref discovery.
-        let Some(upstream) = uri.path().strip_suffix("/info/refs") else {
-            todo!("handle {uri}")
+
+        if request.uri().query() != Some("service=git-upload-pack") {
+            return StatusCode::NOT_FOUND.into_response();
+        }
+
+        let Some(upstream) = request.uri().path().strip_suffix("/info/refs") else {
+            return StatusCode::NOT_FOUND.into_response();
         };
         let upstream: Uri = format!("https:/{}", upstream).parse().unwrap();
-        let repo = repos.open(upstream).await;
+
+        let mut repo = repos.open(upstream).await;
+        repo.ensure_init().await.unwrap();
+
         handle_ref_discovery(repo).await
-    } else if request.method() == Method::POST && uri.path().ends_with("/git-upload-pack") {
+    } else if request.method() == Method::POST {
         // "Smart" protocol client step 2: compute.
-        handle_upload_pack().await
+
+        let Some(upstream) = request.uri().path().strip_suffix("/git-upload-pack") else {
+            return StatusCode::NOT_FOUND.into_response();
+        };
+        let upstream: Uri = format!("https:/{}", upstream).parse().unwrap();
+
+        let repo = repos.open(upstream).await;
+
+        handle_upload_pack(repo, request).await
     } else {
         StatusCode::NOT_FOUND.into_response()
     }
@@ -156,8 +176,8 @@ async fn handle_ref_discovery(mut repo: Repo) -> Response {
     repo.fetch().await.unwrap();
 
     let stdout = Box::into_pin(repo.advertise_refs().unwrap());
-    let body = b"001e# service=git-upload-pack\n0000".chain(stdout);
-    let stream = ReaderStream::new(body);
+    let output = b"001e# service=git-upload-pack\n0000".chain(stdout);
+    let output = ReaderStream::new(output);
 
     Response::builder()
         .status(StatusCode::OK)
@@ -166,25 +186,41 @@ async fn handle_ref_discovery(mut repo: Repo) -> Response {
             "application/x-git-upload-pack-advertisement",
         )
         .header("Cache-Control", "no-cache")
-        .body(Body::from_stream(stream))
+        .body(Body::from_stream(output))
         .unwrap()
 }
 
 #[instrument(level = "debug")]
-async fn handle_upload_pack() -> Response {
+async fn handle_upload_pack(mut repo: Repo, request: Request) -> Response {
+    // FIXME: validate & authenticate on upstream, and appropriately reply to client
+
+    let input = request
+        .into_body()
+        .into_data_stream()
+        .map_err(|err| Error::new(ErrorKind::Other, err));
+    let stdin = StreamReader::new(input);
+
+    // FIXME: pipe client body into git-upload-pack stdin
+
+    let output = Box::into_pin(repo.upload_pack().unwrap());
+    let output = ReaderStream::new(output);
+
     Response::builder()
-        .status(StatusCode::NOT_IMPLEMENTED)
-        .body(Body::empty())
+        .status(StatusCode::OK)
+        .header("Content-Type", "application/x-git-upload-pack-result")
+        .header("Cache-Control", "no-cache")
+        .body(Body::from_stream(output))
         .unwrap()
 }
 
 #[cfg(test)]
 mod unit_tests {
-    use std::process::ExitStatus;
+    use std::process::{ExitStatus};
 
     use http_body_util::BodyExt;
     use mockall::predicate::eq;
     use tempfile::tempdir;
+    
     use tower::{Service, ServiceExt};
 
     use super::*;
@@ -312,15 +348,57 @@ mod unit_tests {
         assert_eq!(fetch.status(), StatusCode::OK);
     }
 
-    #[test]
+    #[tokio::test]
+    async fn upload_pack() {
+        let config = Options {
+            cache_dir: tempdir().unwrap().into_path(),
+            port: 0,
+        };
+
+        let mut mock_git = Git::default();
+
+        // TODO: check sequence of git ops?
+
+        mock_git
+            .expect_upload_pack()
+            .with(eq(config.cache_dir.join("example.com/a/b/c.git")))
+            .times(1)
+            .returning(|_| Ok(Box::new("mock git-upload-pack output".as_bytes())));
+
+        let app = app(&config, mock_git).await.unwrap();
+
+        let response = app
+            .oneshot(
+                Request::post("/example.com/a/b/c/git-upload-pack")
+                    .body(Body::from("mock client input: 42")) // FIXME: use some non-empty payload
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        assert_eq!(
+            Vec::from_iter(response.headers().get_all("content-type").into_iter()),
+            ["application/x-git-upload-pack-result"]
+        );
+
+        assert_eq!(
+            Vec::from_iter(response.headers().get_all("cache-control").into_iter()),
+            ["no-cache"]
+        );
+
+        assert_eq!(
+            response.into_body().collect().await.unwrap().to_bytes(),
+            "mock git-upload-pack output: 42"
+        );
+    }
+
+    #[tokio::test]
     #[ignore]
-    fn upload_pack() {
+    async fn authentication() {
         todo!()
     }
 
-    #[test]
-    #[ignore]
-    fn authentication() {
-        todo!()
-    }
+    // TODO: support or at least don't break with git protocol v2
 }
