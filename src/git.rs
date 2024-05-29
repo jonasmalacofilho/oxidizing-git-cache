@@ -67,12 +67,22 @@ impl Git {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()?;
+
+        // In general, this could cause issues, since we're writing to stdin without attempting to
+        // read from stdout: the child could block on not being able to write, stop reading, and by
+        // consequence block us to.
+        //
+        // However, by the nature of the git protocol, assume git-upload-pack specifically needs to
+        // read the entire input (wants and haves) before being able to write back. This should be
+        // true at least in the happy path, where all wants are valid.
+        // FIXME: make this robust to git-upload-pack blocking, or ensure it can't happen
         child
             .stdin
             .take()
             .expect("stdin should be piped")
             .write_all(&input)
             .await?;
+
         Ok(Box::new(
             child.stdout.take().expect("stdout should be piped"),
         ))

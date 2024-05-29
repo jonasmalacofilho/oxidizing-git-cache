@@ -206,8 +206,11 @@ async fn handle_upload_pack(mut repo: Repo, request: Request) -> Response {
     //    .map_err(|err| Error::new(ErrorKind::Other, err));
     //let stdin = StreamReader::new(input);
 
+    // FIXME: missing any type of safety limit on the body size
     let input = request.into_body().collect().await.unwrap().to_bytes();
-    dbg!(&input);
+
+    // FIXME: can't deal with large wants, which are gzip compressed
+
     let output = Box::into_pin(repo.upload_pack(input).await.unwrap());
     let output = ReaderStream::new(output);
 
@@ -367,16 +370,19 @@ mod unit_tests {
 
         mock_git
             .expect_upload_pack()
-            //.with(eq(config.cache_dir.join("example.com/a/b/c.git")))
+            .with(
+                eq(config.cache_dir.join("example.com/a/b/c.git")),
+                eq(Bytes::from("mock client input: 42")),
+            )
             .times(1)
-            .returning(|_, _| Ok(Box::new("mock git-upload-pack output: 42".as_bytes())));
+            .returning(|_, _| Ok(Box::new("mock git-upload-pack output".as_bytes())));
 
         let app = app(&config, mock_git).await.unwrap();
 
         let response = app
             .oneshot(
                 Request::post("/example.com/a/b/c/git-upload-pack")
-                    .body(Body::from("mock client input: 42")) // FIXME: use some non-empty payload
+                    .body(Body::from("mock client input: 42"))
                     .unwrap(),
             )
             .await
@@ -396,7 +402,7 @@ mod unit_tests {
 
         assert_eq!(
             response.into_body().collect().await.unwrap().to_bytes(),
-            "mock git-upload-pack output: 42"
+            "mock git-upload-pack output"
         );
     }
 
