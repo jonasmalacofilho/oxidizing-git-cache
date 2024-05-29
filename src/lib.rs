@@ -115,7 +115,6 @@ impl Repo {
         &mut self,
         input: Bytes,
     ) -> Result<Box<dyn AsyncRead + Send + Sync + 'static>> {
-        // FIXME: do something with input
         self.git.upload_pack(self.local.clone(), input).await
     }
 }
@@ -174,7 +173,6 @@ async fn router(State(repos): State<Arc<Repos>>, request: Request<Body>) -> Resp
 async fn handle_ref_discovery(mut repo: Repo) -> Response {
     // TODO: validate & authenticate on upstream, and appropriately reply to client
 
-    // TODO: supply authentication
     repo.fetch().await.unwrap();
 
     let stdout = Box::into_pin(repo.advertise_refs().unwrap());
@@ -194,14 +192,14 @@ async fn handle_ref_discovery(mut repo: Repo) -> Response {
 
 #[instrument(level = "debug")]
 async fn handle_upload_pack(mut repo: Repo, request: Request) -> Response {
-    // FIXME: validate & authenticate on upstream, and appropriately reply to client
+    // TODO: validate & authenticate on upstream, and appropriately reply to client
 
     // FIXME: pipe client body into git-upload-pack stdin
-    //let input = request
-    //    .into_body()
-    //    .into_data_stream()
-    //    .map_err(|err| Error::new(ErrorKind::Other, err));
-    //let stdin = StreamReader::new(input);
+    // let input = request
+    //     .into_body()
+    //     .into_data_stream()
+    //     .map_err(|err| Error::new(ErrorKind::Other, err));
+    // let stdin = StreamReader::new(input);
 
     // FIXME: missing any type of safety limit on the body size
     let input = request.into_body().collect().await.unwrap().to_bytes();
@@ -246,9 +244,8 @@ mod unit_tests {
             port: 0,
         };
 
-        let mut mock_git = Git::default();
-
         // TODO: check sequence of git ops?
+        let mut mock_git = Git::default();
 
         mock_git
             .expect_init()
@@ -309,9 +306,8 @@ mod unit_tests {
             port: 0,
         };
 
-        let mut mock_git = Git::default();
-
         // TODO: check sequence of git ops?
+        let mut mock_git = Git::default();
 
         mock_git
             .expect_init()
@@ -361,9 +357,8 @@ mod unit_tests {
             port: 0,
         };
 
-        let mut mock_git = Git::default();
-
         // TODO: check sequence of git ops?
+        let mut mock_git = Git::default();
 
         mock_git
             .expect_upload_pack()

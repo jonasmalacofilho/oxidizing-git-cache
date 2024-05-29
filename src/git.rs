@@ -18,6 +18,7 @@ type AsyncOutput = Box<dyn AsyncRead + Send + Sync + 'static>;
 #[cfg_attr(test, automock, allow(dead_code))]
 impl Git {
     pub async fn init(&self, local: PathBuf) -> Result<Output> {
+        // TODO: store stdout/stderr and log/return on errors
         let child = Command::new("git")
             .arg("init")
             .arg("--quiet")
@@ -43,7 +44,8 @@ impl Git {
     }
 
     pub fn advertise_refs(&self, local: PathBuf) -> Result<AsyncOutput> {
-        // TODO: enable kill on drop (prob. requires returning the child)
+        // FIXME: no control over child termination and reaping
+        // TODO: store stdout/stderr and log/return on errors
         // TODO: try to unbox
         let mut child = Command::new("git-upload-pack")
             .arg("--stateless-rpc")
@@ -57,8 +59,10 @@ impl Git {
     }
 
     pub async fn upload_pack(&self, local: PathBuf, input: Bytes) -> Result<AsyncOutput> {
-        // TODO: enable kill on drop (prob. requires returning the child)
+        // FIXME: no control over child termination and reaping
+        // TODO: store stdout/stderr and log/return on errors
         // TODO: try to unbox
+
         let mut child = Command::new("git-upload-pack")
             .arg("--stateless-rpc")
             .arg(local)
