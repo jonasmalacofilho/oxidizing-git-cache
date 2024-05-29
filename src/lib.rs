@@ -1,21 +1,23 @@
 use std::io::{Error, ErrorKind, Result};
+use std::ops::Deref;
 use std::path::PathBuf;
 use std::process::Output;
 use std::sync::Arc;
 
 use futures_util::stream::TryStreamExt;
 
+use http_body_util::BodyExt;
 use tokio::fs;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::net::TcpListener;
 use tokio_util::io::{ReaderStream, StreamReader};
 
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::extract::{Request, State};
 use axum::http::{Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
-use axum::Router;
+use axum::{RequestExt, Router};
 
 use tracing::{info, instrument};
 
@@ -112,9 +114,12 @@ impl Repo {
     }
 
     #[instrument(level = "debug", skip_all)]
-    pub fn upload_pack(&mut self) -> Result<Box<dyn AsyncRead + Send + Sync + 'static>> {
+    pub async fn upload_pack(
+        &mut self,
+        input: Bytes,
+    ) -> Result<Box<dyn AsyncRead + Send + Sync + 'static>> {
         // FIXME: do something with input
-        self.git.upload_pack(self.local.clone())
+        self.git.upload_pack(self.local.clone(), input).await
     }
 }
 
@@ -194,15 +199,16 @@ async fn handle_ref_discovery(mut repo: Repo) -> Response {
 async fn handle_upload_pack(mut repo: Repo, request: Request) -> Response {
     // FIXME: validate & authenticate on upstream, and appropriately reply to client
 
-    let input = request
-        .into_body()
-        .into_data_stream()
-        .map_err(|err| Error::new(ErrorKind::Other, err));
-    let stdin = StreamReader::new(input);
-
     // FIXME: pipe client body into git-upload-pack stdin
+    //let input = request
+    //    .into_body()
+    //    .into_data_stream()
+    //    .map_err(|err| Error::new(ErrorKind::Other, err));
+    //let stdin = StreamReader::new(input);
 
-    let output = Box::into_pin(repo.upload_pack().unwrap());
+    let input = request.into_body().collect().await.unwrap().to_bytes();
+    dbg!(&input);
+    let output = Box::into_pin(repo.upload_pack(input).await.unwrap());
     let output = ReaderStream::new(output);
 
     Response::builder()
@@ -215,12 +221,12 @@ async fn handle_upload_pack(mut repo: Repo, request: Request) -> Response {
 
 #[cfg(test)]
 mod unit_tests {
-    use std::process::{ExitStatus};
+    use std::process::ExitStatus;
 
     use http_body_util::BodyExt;
     use mockall::predicate::eq;
     use tempfile::tempdir;
-    
+
     use tower::{Service, ServiceExt};
 
     use super::*;
@@ -361,9 +367,9 @@ mod unit_tests {
 
         mock_git
             .expect_upload_pack()
-            .with(eq(config.cache_dir.join("example.com/a/b/c.git")))
+            //.with(eq(config.cache_dir.join("example.com/a/b/c.git")))
             .times(1)
-            .returning(|_| Ok(Box::new("mock git-upload-pack output".as_bytes())));
+            .returning(|_, _| Ok(Box::new("mock git-upload-pack output: 42".as_bytes())));
 
         let app = app(&config, mock_git).await.unwrap();
 

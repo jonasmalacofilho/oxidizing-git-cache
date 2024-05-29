@@ -1,10 +1,12 @@
 use std::io::Result;
+use std::ops::Deref;
 use std::path::PathBuf;
 use std::process::{Output, Stdio};
 
+use axum::body::Bytes;
 use axum::http::Uri;
-use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::process::{Command};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use tokio::process::Command;
 
 #[cfg(test)]
 use mockall::automock;
@@ -56,7 +58,7 @@ impl Git {
         ))
     }
 
-    pub fn upload_pack(&self, local: PathBuf) -> Result<AsyncOutput> {
+    pub async fn upload_pack(&self, local: PathBuf, input: Bytes) -> Result<AsyncOutput> {
         // TODO: enable kill on drop (prob. requires returning the child)
         // TODO: try to unbox
         let mut child = Command::new("git-upload-pack")
@@ -65,6 +67,12 @@ impl Git {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()?;
+        child
+            .stdin
+            .take()
+            .expect("stdin should be piped")
+            .write_all(&input)
+            .await?;
         Ok(Box::new(
             child.stdout.take().expect("stdout should be piped"),
         ))
