@@ -1,11 +1,10 @@
 use std::io::Result;
-use std::ops::Deref;
 use std::path::PathBuf;
 use std::process::{Output, Stdio};
 
 use axum::body::Bytes;
 use axum::http::Uri;
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncWriteExt};
 use tokio::process::Command;
 
 #[cfg(test)]
@@ -14,7 +13,6 @@ use mockall::automock;
 #[derive(Default, Debug)]
 pub struct Git {}
 
-type AsyncInput = Box<dyn AsyncWrite + Send + Sync + 'static>;
 type AsyncOutput = Box<dyn AsyncRead + Send + Sync + 'static>;
 
 #[cfg_attr(test, automock, allow(dead_code))]
