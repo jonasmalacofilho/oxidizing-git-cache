@@ -92,10 +92,8 @@ pub struct Repo {
 impl Repo {
     #[instrument(level = "debug", skip_all)]
     pub async fn ensure_init(&mut self) -> Result<()> {
-        // TODO: avoid doing this everytime
         fs::create_dir_all(&self.local).await?;
-        let _ = self.git.init(self.local.clone()).await;
-        Ok(())
+        self.git.init(self.local.clone()).await.map(|_| ())
     }
 
     #[instrument(level = "debug", skip_all)]
@@ -128,6 +126,7 @@ async fn app(options: &Options, git: Git) -> Result<Router> {
 
     let repos = Repos::new(options.cache_dir.clone(), Arc::new(git));
 
+    // TODO: delegate more to the axum router
     Ok(Router::new()
         .route("/*req", any(router))
         .with_state(Arc::new(repos)))
@@ -150,8 +149,7 @@ async fn router(State(repos): State<Arc<Repos>>, request: Request<Body>) -> Resp
         let upstream: Uri = format!("https:/{}", upstream).parse().unwrap();
 
         let mut repo = repos.open(upstream).await;
-        repo.ensure_init().await.unwrap();
-
+        repo.ensure_init().await.unwrap(); // FIXME: server only needs to call this once
         handle_ref_discovery(repo).await
     } else if request.method() == Method::POST {
         // "Smart" protocol client step 2: compute.
@@ -161,8 +159,8 @@ async fn router(State(repos): State<Arc<Repos>>, request: Request<Body>) -> Resp
         };
         let upstream: Uri = format!("https:/{}", upstream).parse().unwrap();
 
-        let repo = repos.open(upstream).await;
-
+        let mut repo = repos.open(upstream).await;
+        repo.ensure_init().await.unwrap(); // FIXME: server only needs to call this once
         handle_upload_pack(repo, request).await
     } else {
         StatusCode::NOT_FOUND.into_response()
@@ -359,6 +357,11 @@ mod unit_tests {
 
         // TODO: check sequence of git ops?
         let mut mock_git = Git::default();
+
+        mock_git
+            .expect_init()
+            .times(1)
+            .returning(|_| default_output());
 
         mock_git
             .expect_upload_pack()
