@@ -96,8 +96,10 @@ pub struct Repo {
 impl Repo {
     #[instrument(level = "debug", skip_all)]
     pub async fn fetch(&mut self) -> Result<()> {
+        // Assume we (the server) has a modern git that supports symrefs.
         let remote_head = self.git.remote_head(self.upstream.clone()).await?;
         tokio::fs::write(self.local.join("HEAD"), remote_head).await?;
+
         self.git
             .fetch(self.upstream.clone(), self.local.clone())
             .await
