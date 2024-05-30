@@ -53,12 +53,12 @@ pub async fn start(options: &Options) -> Result<()> {
 }
 
 #[derive(Debug)]
-struct Repos {
+struct Index {
     cache_dir: PathBuf,
     git: Arc<Git>,
 }
 
-impl Repos {
+impl Index {
     fn new(cache_dir: PathBuf, git: Arc<Git>) -> Self {
         Self { cache_dir, git }
     }
@@ -123,7 +123,7 @@ async fn app(options: &Options, git: Git) -> Result<Router> {
     fs::write(&options.cache_dir.join(".git-cache"), "").await?; // FIXME: lock
     info!("Cache directory is {:?}", options.cache_dir);
 
-    let repos = Repos::new(options.cache_dir.clone(), Arc::new(git));
+    let repos = Index::new(options.cache_dir.clone(), Arc::new(git));
 
     // TODO: delegate more to the axum router
     Ok(Router::new()
@@ -132,7 +132,7 @@ async fn app(options: &Options, git: Git) -> Result<Router> {
 }
 
 #[instrument(level = "debug", skip_all)]
-async fn router(State(repos): State<Arc<Repos>>, request: Request<Body>) -> Response {
+async fn router(State(repos): State<Arc<Index>>, request: Request<Body>) -> Response {
     // TODO: extract credentials
 
     if request.method() == Method::GET {

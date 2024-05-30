@@ -4,7 +4,7 @@ use std::process::{Output, Stdio};
 
 use axum::body::Bytes;
 use axum::http::Uri;
-use tokio::io::{AsyncRead, AsyncWriteExt};
+use tokio::io::AsyncRead;
 use tokio::process::Command;
 
 #[cfg(test)]
@@ -70,20 +70,24 @@ impl Git {
             .stdout(Stdio::piped())
             .spawn()?;
 
-        // In general, this could cause issues, since we're writing to stdin without attempting to
-        // read from stdout: the child could block on not being able to write, stop reading, and by
-        // consequence block us to.
+        let mut stdin = child.stdin.take().expect("stdin should be piped");
+
+        // While in general we expect git-upload-pack to process its entire input before writing
+        // anything to its output, that's might not be necessarily true in all cases.
         //
-        // However, by the nature of the git protocol, assume git-upload-pack specifically needs to
-        // read the entire input (wants and haves) before being able to write back. This should be
-        // true at least in the happy path, where all wants are valid.
-        // FIXME: make this robust to git-upload-pack blocking, or ensure it can't happen
-        child
-            .stdin
-            .take()
-            .expect("stdin should be piped")
-            .write_all(&input)
-            .await?;
+        // For robusness, we need to write to `child` concurrently with reading its output. But its
+        // output will be forwarded by axum to the client, *after* the HTTP status code has already
+        // been sent (200 OK).
+        //
+        // Therefore we don't really have to return write errors to the client. And with the
+        // current git op abstraction, it wouldn't be possible to do it (changing the abstraction
+        // is hard because it has to be easily mockable in tests). So instead just log any such
+        // errors.
+        tokio::spawn(async move {
+            if let Err(err) = tokio::io::copy_buf(&mut &*input, &mut stdin).await {
+                tracing::info!(?err, "i/o error while writing to git-upload-pack");
+            }
+        });
 
         Ok(Box::new(
             child.stdout.take().expect("stdout should be piped"),
