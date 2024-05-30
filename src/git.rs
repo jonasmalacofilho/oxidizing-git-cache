@@ -24,6 +24,7 @@ impl Git {
             .arg("--quiet")
             .arg("--bare")
             .arg(local)
+            .stdin(Stdio::null())
             .spawn()?;
         child.wait_with_output().await
     }
@@ -37,6 +38,7 @@ impl Git {
             .arg("ls-remote")
             .arg("--symref")
             .arg(upstream.to_string())
+            .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .spawn()?;
 
@@ -70,6 +72,7 @@ impl Git {
             .arg("--prune-tags")
             .arg(upstream.to_string())
             .arg("+refs/*:refs/*") // Map all upstream refs to local refs.
+            .stdin(Stdio::null())
             .spawn()?;
         child.wait_with_output().await
     }
@@ -82,6 +85,7 @@ impl Git {
             .arg("--stateless-rpc")
             .arg("--http-backend-info-refs")
             .arg(local)
+            .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .spawn()?;
         Ok(Box::new(
