@@ -64,21 +64,26 @@ impl Repos {
     }
 
     #[instrument(level = "debug", skip_all)]
-    async fn open(&self, upstream: Uri) -> Repo {
+    async fn open(&self, upstream: Uri) -> Result<Repo> {
         // FIXME: upstream must be sanitized:
         // - upstreams that escape out of the cache-dir
         // - upstreams that turn into subpaths of existing cached repos
         // - upstreams that result in absolute-looking paths being feed into Path::join
 
-        Repo {
+        let local = self
+            .cache_dir
+            .join(upstream.host().unwrap())
+            .join(&upstream.path()[1..])
+            .with_extension("git");
+
+        fs::create_dir_all(&local).await?;
+        self.git.init(local.clone()).await?;
+
+        Ok(Repo {
             git: self.git.clone(),
             upstream: upstream.clone(),
-            local: self
-                .cache_dir
-                .join(upstream.host().unwrap())
-                .join(&upstream.path()[1..])
-                .with_extension("git"),
-        }
+            local,
+        })
     }
 }
 
@@ -90,12 +95,6 @@ pub struct Repo {
 }
 
 impl Repo {
-    #[instrument(level = "debug", skip_all)]
-    pub async fn ensure_init(&mut self) -> Result<()> {
-        fs::create_dir_all(&self.local).await?;
-        self.git.init(self.local.clone()).await.map(|_| ())
-    }
-
     #[instrument(level = "debug", skip_all)]
     pub async fn fetch(&mut self) -> Result<Output> {
         self.git
@@ -148,8 +147,7 @@ async fn router(State(repos): State<Arc<Repos>>, request: Request<Body>) -> Resp
         };
         let upstream: Uri = format!("https:/{}", upstream).parse().unwrap();
 
-        let mut repo = repos.open(upstream).await;
-        repo.ensure_init().await.unwrap(); // FIXME: server only needs to call this once
+        let repo = repos.open(upstream).await.unwrap();
         handle_ref_discovery(repo).await
     } else if request.method() == Method::POST {
         // "Smart" protocol client step 2: compute.
@@ -159,8 +157,7 @@ async fn router(State(repos): State<Arc<Repos>>, request: Request<Body>) -> Resp
         };
         let upstream: Uri = format!("https:/{}", upstream).parse().unwrap();
 
-        let mut repo = repos.open(upstream).await;
-        repo.ensure_init().await.unwrap(); // FIXME: server only needs to call this once
+        let repo = repos.open(upstream).await.unwrap();
         handle_upload_pack(repo, request).await
     } else {
         StatusCode::NOT_FOUND.into_response()
