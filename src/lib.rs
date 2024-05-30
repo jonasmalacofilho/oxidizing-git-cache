@@ -1,6 +1,5 @@
 use std::io::Result;
 use std::path::PathBuf;
-use std::process::Output;
 use std::sync::Arc;
 
 use http_body_util::BodyExt;
@@ -96,10 +95,13 @@ pub struct Repo {
 
 impl Repo {
     #[instrument(level = "debug", skip_all)]
-    pub async fn fetch(&mut self) -> Result<Output> {
+    pub async fn fetch(&mut self) -> Result<()> {
+        let remote_head = self.git.remote_head(self.upstream.clone()).await?;
+        tokio::fs::write(self.local.join("HEAD"), remote_head).await?;
         self.git
             .fetch(self.upstream.clone(), self.local.clone())
             .await
+            .map(|_| ())
     }
 
     #[instrument(level = "debug", skip_all)]
@@ -214,7 +216,7 @@ async fn handle_upload_pack(mut repo: Repo, request: Request) -> Response {
 
 #[cfg(test)]
 mod unit_tests {
-    use std::process::ExitStatus;
+    use std::process::{ExitStatus, Output};
 
     use http_body_util::BodyExt;
     use mockall::predicate::eq;
@@ -247,6 +249,12 @@ mod unit_tests {
             .with(eq(config.cache_dir.join("example.com/a/b/c.git")))
             .times(1)
             .returning(|_| default_output());
+
+        mock_git
+            .expect_remote_head()
+            .with(eq(Uri::from_static("https://example.com/a/b/c")))
+            .times(1)
+            .returning(|_| Ok(String::from("ref: refs/heads/mock")));
 
         mock_git
             .expect_fetch()
@@ -313,6 +321,11 @@ mod unit_tests {
             .expect_fetch()
             .times(2)
             .returning(|_, _| default_output());
+
+        mock_git
+            .expect_remote_head()
+            .times(2)
+            .returning(|_| Ok(String::from("ref: refs/heads/mock")));
 
         mock_git
             .expect_advertise_refs()

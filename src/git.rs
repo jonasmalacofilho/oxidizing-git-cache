@@ -28,9 +28,40 @@ impl Git {
         child.wait_with_output().await
     }
 
+    pub async fn remote_head(&self, upstream: Uri) -> Result<String> {
+        // FIXME: return useful (or at least suitable) error type
+        // TODO: store stderr and log/return on errors
+        // HACK: this is a quite brittle and inneficient way to get the remote HEAD
+
+        let child = Command::new("git")
+            .arg("ls-remote")
+            .arg("--symref")
+            .arg(upstream.to_string())
+            .stdout(Stdio::piped())
+            .spawn()?;
+
+        let output = child.wait_with_output().await?;
+        if !output.status.success() {
+            return Err(std::io::Error::other(
+                "git ls-remote exited with non-zero status",
+            ));
+        }
+
+        let output =
+            String::from_utf8(output.stdout).expect("ls-remote output should(?) be valid utf-8");
+
+        Ok(output
+            .lines()
+            .next()
+            .expect("remote should(?) return at least one ref")
+            .strip_suffix("\tHEAD")
+            .expect("first ref should(?)be HEAD symref")
+            .to_owned())
+    }
+
     pub async fn fetch(&self, upstream: Uri, local: PathBuf) -> Result<Output> {
         // TODO: set up authentication
-        // TODO: store stdout/stderr and log/return on errors
+        // TODO: store stderr and log/return on errors
         let child = Command::new("git")
             .arg("-C")
             .arg(local)
@@ -45,7 +76,7 @@ impl Git {
 
     pub fn advertise_refs(&self, local: PathBuf) -> Result<AsyncOutput> {
         // FIXME: no control over child termination and reaping
-        // TODO: store stdout/stderr and log/return on errors
+        // TODO: store stderr and log/return on errors
         // TODO: try to unbox
         let mut child = Command::new("git-upload-pack")
             .arg("--stateless-rpc")
@@ -60,7 +91,7 @@ impl Git {
 
     pub async fn upload_pack(&self, local: PathBuf, input: Bytes) -> Result<AsyncOutput> {
         // FIXME: no control over child termination and reaping
-        // TODO: store stdout/stderr and log/return on errors
+        // TODO: store stderr and log/return on errors
         // TODO: try to unbox
 
         let mut child = Command::new("git-upload-pack")
