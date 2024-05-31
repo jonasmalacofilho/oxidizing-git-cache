@@ -6,6 +6,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub enum Error {
     StatusCode { status: StatusCode },
     Io { source: std::io::Error },
+    Git { description: &'static str },
     Other,
 }
 

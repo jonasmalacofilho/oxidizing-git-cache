@@ -1,4 +1,4 @@
-use std::io::Result;
+use std::io;
 use std::path::PathBuf;
 use std::process::{Output, Stdio};
 
@@ -6,6 +6,8 @@ use axum::body::Bytes;
 use axum::http::Uri;
 use tokio::io::{AsyncRead, AsyncWriteExt};
 use tokio::process::Command;
+
+use crate::error::{Error, Result};
 
 #[cfg(test)]
 use mockall::automock;
@@ -17,7 +19,7 @@ type AsyncOutput = Box<dyn AsyncRead + Send + Sync + 'static>;
 
 #[cfg_attr(test, automock, allow(dead_code))]
 impl Git {
-    pub async fn init(&self, local: PathBuf) -> Result<Output> {
+    pub async fn init(&self, local: PathBuf) -> io::Result<Output> {
         // TODO: store stdout/stderr and log/return on errors
         let child = Command::new("git")
             .arg("init")
@@ -44,24 +46,29 @@ impl Git {
 
         let output = child.wait_with_output().await?;
         if !output.status.success() {
-            return Err(std::io::Error::other(
-                "git ls-remote exited with non-zero status",
-            ));
+            return Err(Error::Git {
+                description: "git ls-remote exited with non-zero status",
+            });
         }
 
-        let output =
-            String::from_utf8(output.stdout).expect("ls-remote output should(?) be valid utf-8");
+        let output = String::from_utf8(output.stdout).map_err(|_| Error::Git {
+            description: "ls-remote output should(?) be valid utf-8",
+        })?;
 
         Ok(output
             .lines()
             .next()
-            .expect("remote should(?) return at least one ref")
+            .ok_or(Error::Git {
+                description: "remote should(?) return at least one ref",
+            })?
             .strip_suffix("\tHEAD")
-            .expect("first ref should(?)be HEAD symref")
+            .ok_or(Error::Git {
+                description: "first ref should(?)be HEAD symref",
+            })?
             .to_owned())
     }
 
-    pub async fn fetch(&self, upstream: Uri, local: PathBuf) -> Result<Output> {
+    pub async fn fetch(&self, upstream: Uri, local: PathBuf) -> io::Result<Output> {
         // TODO: set up authentication
         // TODO: store stderr and log/return on errors
         let child = Command::new("git")
@@ -77,7 +84,7 @@ impl Git {
         child.wait_with_output().await
     }
 
-    pub fn advertise_refs(&self, local: PathBuf) -> Result<AsyncOutput> {
+    pub fn advertise_refs(&self, local: PathBuf) -> io::Result<AsyncOutput> {
         // FIXME: no control over child termination and reaping
         // TODO: store stderr and log/return on errors
         // TODO: try to unbox
@@ -93,7 +100,7 @@ impl Git {
         ))
     }
 
-    pub async fn upload_pack(&self, local: PathBuf, input: Bytes) -> Result<AsyncOutput> {
+    pub async fn upload_pack(&self, local: PathBuf, input: Bytes) -> io::Result<AsyncOutput> {
         // FIXME: no control over child termination and reaping
         // TODO: store stderr and log/return on errors
         // TODO: try to unbox
