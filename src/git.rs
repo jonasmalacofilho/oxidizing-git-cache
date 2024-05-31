@@ -4,7 +4,7 @@ use std::process::{Output, Stdio};
 
 use axum::body::Bytes;
 use axum::http::Uri;
-use tokio::io::AsyncRead;
+use tokio::io::{AsyncRead, AsyncWriteExt};
 use tokio::process::Command;
 
 #[cfg(test)]
@@ -119,7 +119,7 @@ impl Git {
         // is hard because it has to be easily mockable in tests). So instead just log any such
         // errors.
         tokio::spawn(async move {
-            if let Err(err) = tokio::io::copy_buf(&mut &*input, &mut stdin).await {
+            if let Err(err) = stdin.write_all(&input).await {
                 tracing::info!(?err, "i/o error while writing to git-upload-pack");
             }
         });
