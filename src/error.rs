@@ -6,13 +6,16 @@ pub type Result<T> = std::result::Result<T, Error>;
 ///
 /// These errors are for our benefit only, the client will just get a StatusCode.
 ///
-/// There are only a few types of error conditions we need to care about:
+/// There are only a few types of error conditions we need to care about. The first three are
+/// modelled using this `Error` type:
 ///
 /// - the few specific cases where we want to reply with NOT_FOUND or BAD_REQUEST;
 /// - (future) handling an UNAUTHORIZED response from `Git::remote_head`;
 /// - internal server errors that cannot be recovered within that request (but that are presumed to
-///   *not* affect all other/future requests) and can be type erased;
-/// - TODO: server-wide non-recoverable errors, which are panics (and we build with `panic = "abort"`).
+///   *not* affect all other/future requests) and can be type erased.
+///
+/// Additionally, server-wide non-recoverable errors are modelled with panics. And we build with
+/// `panic = "abort"`.
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error("not found")]

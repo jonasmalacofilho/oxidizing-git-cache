@@ -25,3 +25,9 @@ tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
 mockall = "0.12.1"
 tempfile = "3.10.1"
 tower = "0.4.13"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"

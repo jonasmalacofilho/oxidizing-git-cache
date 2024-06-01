@@ -18,22 +18,21 @@ pub struct Git {}
 
 type AsyncOutput = Box<dyn AsyncRead + Send + Sync + 'static>;
 
-fn check_child_exit_status(
-    output: &Output,
+fn exited_ok_with_stdout(
+    output: Output,
     process_name: &'static str,
     error_message: &'static str,
-) -> Result<()> {
+) -> Result<Vec<u8>> {
     if !output.status.success() {
         tracing::error!(
             status = output.status.into_raw(),
-            stdout = String::from_utf8_lossy(&output.stdout).into_owned(),
             stderr = String::from_utf8_lossy(&output.stderr).into_owned(),
             "`{}` exited with non-zero status",
             process_name
         );
         return Err(anyhow!(error_message).into());
     }
-    Ok(())
+    Ok(output.stdout)
 }
 
 #[cfg_attr(test, automock, allow(dead_code))]
@@ -47,9 +46,11 @@ impl Git {
             .stdin(Stdio::null())
             .output()
             .await
-            .context("failed to execute `git init`")?;
+            .expect("failed to execute `git init`");
 
-        check_child_exit_status(&output, "git init", "failed to initialize repository")
+        exited_ok_with_stdout(output, "git init", "failed to initialize repository")?;
+
+        Ok(())
     }
 
     pub async fn remote_head(&self, upstream: Uri) -> Result<String> {
@@ -64,14 +65,14 @@ impl Git {
             .stdout(Stdio::piped())
             .output()
             .await
-            .context("failed to execute `git ls-remote`")?;
+            .expect("failed to execute `git ls-remote`");
 
-        check_child_exit_status(&output, "git ls-remote", "failed to fetch remote refs")?;
+        let stdout = exited_ok_with_stdout(output, "git ls-remote", "failed to fetch remote refs")?;
 
-        let output = String::from_utf8(output.stdout)
-            .context("output from `git ls-remote` is not valid utf-8")?;
+        let refs =
+            String::from_utf8(stdout).context("output from `git ls-remote` is not valid utf-8")?;
 
-        Ok(output
+        Ok(refs
             .lines()
             .next()
             .ok_or(anyhow!("failed to fetch remote refs"))?
@@ -94,9 +95,9 @@ impl Git {
             .stdin(Stdio::null())
             .output()
             .await
-            .context("failed to execute `git fetch`")?;
+            .expect("failed to execute `git fetch`");
 
-        check_child_exit_status(&output, "git fetch", "failed to fetch from upstream")?;
+        exited_ok_with_stdout(output, "git fetch", "failed to fetch from upstream")?;
 
         Ok(())
     }
@@ -110,7 +111,7 @@ impl Git {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .context("failed to spawn `git-upload-pack`")?;
+            .expect("failed to spawn `git-upload-pack`");
 
         let stdout = child.stdout.take().expect("stdout should be piped");
 
@@ -121,13 +122,14 @@ impl Git {
         tokio::spawn(async move {
             match child.wait_with_output().await {
                 Ok(output) => {
-                    let _ = check_child_exit_status(
-                        &output,
+                    // Log stderr and exit status if not successful.
+                    let _ = exited_ok_with_stdout(
+                        output,
                         "git-upload-pack",
                         "failed to advertise refs",
                     );
                 }
-                Err(err) => tracing::error!(?err, "failed to wait for `git-upload-pack` to exit"),
+                Err(_) => panic!("failed to wait for `git-upload-pack` to exit"),
             };
         });
 
@@ -143,7 +145,7 @@ impl Git {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .context("failed to spawn `git-upload-pack`")?;
+            .expect("failed to spawn `git-upload-pack`");
 
         let mut stdin = child.stdin.take().expect("stdin should be piped");
         let stdout = child.stdout.take().expect("stdout should be piped");
@@ -161,7 +163,7 @@ impl Git {
         // errors.
         tokio::spawn(async move {
             if let Err(err) = stdin.write_all(&input).await {
-                tracing::error!(?err, "i/o error while writing to git-upload-pack");
+                tracing::error!(error = ?err, "i/o error while writing to git-upload-pack");
             }
         });
 
@@ -172,13 +174,14 @@ impl Git {
         tokio::spawn(async move {
             match child.wait_with_output().await {
                 Ok(output) => {
-                    let _ = check_child_exit_status(
-                        &output,
+                    // Log stderr and exit status if not successful.
+                    let _ = exited_ok_with_stdout(
+                        output,
                         "git-upload-pack",
                         "failed to advertise refs",
                     );
                 }
-                Err(err) => tracing::error!(?err, "failed to wait for `git-upload-pack` to exit"),
+                Err(_) => panic!("failed to wait for `git-upload-pack` to exit"),
             };
         });
 
