@@ -2,6 +2,7 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use anyhow::Context;
 use error::{Error, Result};
 use http_body_util::BodyExt;
 use tokio::fs;
@@ -73,11 +74,13 @@ impl Index {
 
         let local = self
             .cache_dir
-            .join(upstream.host().ok_or(Error::from(StatusCode::NOT_FOUND))?)
+            .join(upstream.host().ok_or(Error::NotFound)?)
             .join(&upstream.path()[1..])
             .with_extension("git");
 
-        fs::create_dir_all(&local).await?;
+        fs::create_dir_all(&local)
+            .await
+            .context("failed to create directory for repository")?;
         self.git.init(local.clone()).await?;
 
         Ok(Repo {
@@ -100,17 +103,17 @@ impl Repo {
     pub async fn fetch(&mut self) -> Result<()> {
         // Assume we (the server) has a modern git that supports symrefs.
         let remote_head = self.git.remote_head(self.upstream.clone()).await?;
-        tokio::fs::write(self.local.join("HEAD"), remote_head).await?;
+        tokio::fs::write(self.local.join("HEAD"), remote_head)
+            .await
+            .context("failed to update HEAD")?;
 
-        Ok(self
-            .git
+        self.git
             .fetch(self.upstream.clone(), self.local.clone())
             .await
-            .map(|_| ())?)
     }
 
     #[instrument(level = "debug", skip_all)]
-    pub fn advertise_refs(&mut self) -> io::Result<Box<dyn AsyncRead + Send + Sync + 'static>> {
+    pub fn advertise_refs(&mut self) -> Result<Box<dyn AsyncRead + Send + Sync + 'static>> {
         self.git.advertise_refs(self.local.clone())
     }
 
@@ -118,7 +121,7 @@ impl Repo {
     pub async fn upload_pack(
         &mut self,
         input: Bytes,
-    ) -> io::Result<Box<dyn AsyncRead + Send + Sync + 'static>> {
+    ) -> Result<Box<dyn AsyncRead + Send + Sync + 'static>> {
         self.git.upload_pack(self.local.clone(), input).await
     }
 }
@@ -146,28 +149,36 @@ async fn router(State(repos): State<Arc<Index>>, request: Request<Body>) -> Resu
         // "Smart" protocol client step 1: ref discovery.
 
         if request.uri().query() != Some("service=git-upload-pack") {
-            return Err(Error::from(StatusCode::NOT_FOUND));
+            return Err(Error::NotFound);
         }
 
-        let Some(upstream) = request.uri().path().strip_suffix("/info/refs") else {
-            return Err(Error::from(StatusCode::NOT_FOUND));
-        };
-        let upstream: Uri = format!("https:/{}", upstream).parse()?;
+        let upstream = request
+            .uri()
+            .path()
+            .strip_suffix("/info/refs")
+            .ok_or(Error::NotFound)?;
+        let upstream: Uri = format!("https:/{}", upstream)
+            .parse()
+            .map_err(|_| Error::NotFound)?;
 
         let repo = repos.open(upstream).await?;
         handle_ref_discovery(repo).await
     } else if request.method() == Method::POST {
         // "Smart" protocol client step 2: compute.
 
-        let Some(upstream) = request.uri().path().strip_suffix("/git-upload-pack") else {
-            return Err(Error::from(StatusCode::NOT_FOUND));
-        };
-        let upstream: Uri = format!("https:/{}", upstream).parse()?;
+        let upstream = request
+            .uri()
+            .path()
+            .strip_suffix("/git-upload-pack")
+            .ok_or(Error::NotFound)?;
+        let upstream: Uri = format!("https:/{}", upstream)
+            .parse()
+            .map_err(|_| Error::NotFound)?;
 
         let repo = repos.open(upstream).await?;
         handle_upload_pack(repo, request).await
     } else {
-        Err(Error::from(StatusCode::NOT_FOUND))
+        Err(Error::NotFound)
     }
 }
 
@@ -209,7 +220,12 @@ async fn handle_upload_pack(mut repo: Repo, request: Request) -> Result<Response
     // TODO: replace with piping client body straight into git-upload-pack stdin
 
     // Proxy git-upload-pack.
-    let input = request.into_body().collect().await?.to_bytes();
+    let input = request
+        .into_body()
+        .collect()
+        .await
+        .context("failed to collect the request body")?
+        .to_bytes();
     let output = Box::into_pin(repo.upload_pack(input).await?);
     let output = ReaderStream::new(output);
     Ok((
@@ -225,8 +241,6 @@ async fn handle_upload_pack(mut repo: Repo, request: Request) -> Result<Response
 
 #[cfg(test)]
 mod unit_tests {
-    use std::process::{ExitStatus, Output};
-
     use http_body_util::BodyExt;
     use mockall::predicate::eq;
     use tempfile::tempdir;
@@ -234,14 +248,6 @@ mod unit_tests {
     use tower::{Service, ServiceExt};
 
     use super::*;
-
-    fn default_output() -> io::Result<Output> {
-        Ok(Output {
-            status: ExitStatus::default(),
-            stdout: vec![],
-            stderr: vec![],
-        })
-    }
 
     #[tokio::test]
     async fn ref_discovery_new_repo() {
@@ -257,7 +263,7 @@ mod unit_tests {
             .expect_init()
             .with(eq(config.cache_dir.join("example.com/a/b/c.git")))
             .times(1)
-            .returning(|_| default_output());
+            .returning(|_| Ok(()));
 
         mock_git
             .expect_remote_head()
@@ -272,7 +278,7 @@ mod unit_tests {
                 eq(config.cache_dir.join("example.com/a/b/c.git")),
             )
             .times(1)
-            .returning(|_, _| default_output());
+            .returning(|_, _| Ok(()));
 
         mock_git
             .expect_advertise_refs()
@@ -328,20 +334,14 @@ mod unit_tests {
         // TODO: check sequence of git ops?
         let mut mock_git = Git::default();
 
-        mock_git
-            .expect_init()
-            .times(1..=2)
-            .returning(|_| default_output());
+        mock_git.expect_init().times(1..=2).returning(|_| Ok(()));
 
         mock_git
             .expect_remote_head()
             .times(2)
             .returning(|_| Ok(String::from("ref: refs/heads/mock")));
 
-        mock_git
-            .expect_fetch()
-            .times(2)
-            .returning(|_, _| default_output());
+        mock_git.expect_fetch().times(2).returning(|_, _| Ok(()));
 
         mock_git
             .expect_advertise_refs()
@@ -384,10 +384,7 @@ mod unit_tests {
         // TODO: check sequence of git ops?
         let mut mock_git = Git::default();
 
-        mock_git
-            .expect_init()
-            .times(1)
-            .returning(|_| default_output());
+        mock_git.expect_init().times(1).returning(|_| Ok(()));
 
         mock_git
             .expect_upload_pack()
