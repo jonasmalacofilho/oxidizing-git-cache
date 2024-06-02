@@ -105,17 +105,17 @@ impl Git {
         // relying on tokio doing that on a best-effort-only basis. This also allow us to log any
         // errors.
         tokio::spawn(async move {
-            match child.wait_with_output().await {
-                Ok(output) => {
-                    // Log stderr and exit status if not successful.
-                    let _ = exited_ok_with_stdout(
-                        output,
-                        "git-upload-pack",
-                        "failed to advertise refs",
-                    );
-                }
-                Err(_) => panic!("failed to wait for `git-upload-pack` to exit"),
-            };
+            let output = child
+                .wait_with_output()
+                .await
+                .expect("failed to wait for `git-upload-pack` to exit");
+            if !output.status.success() {
+                tracing::error!(
+                    status = output.status.into_raw(),
+                    stderr = String::from_utf8_lossy(&output.stderr).into_owned(),
+                    "`git-upload-pack` exited with non-zero status",
+                );
+            }
         });
 
         Ok(Box::new(stdout))
@@ -156,17 +156,17 @@ impl Git {
         // relying on tokio doing that on a best-effort-only basis. This also allow us to log any
         // errors.
         tokio::spawn(async move {
-            match child.wait_with_output().await {
-                Ok(output) => {
-                    // Log stderr and exit status if not successful.
-                    let _ = exited_ok_with_stdout(
-                        output,
-                        "git-upload-pack",
-                        "failed to advertise refs",
-                    );
-                }
-                Err(_) => panic!("failed to wait for `git-upload-pack` to exit"),
-            };
+            let output = child
+                .wait_with_output()
+                .await
+                .expect("failed to wait for `git-upload-pack` to exit");
+            if !output.status.success() {
+                tracing::error!(
+                    status = output.status.into_raw(),
+                    stderr = String::from_utf8_lossy(&output.stderr).into_owned(),
+                    "`git-upload-pack` exited with non-zero status",
+                );
+            }
         });
 
         Ok(Box::new(stdout))
