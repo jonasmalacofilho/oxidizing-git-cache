@@ -13,27 +13,12 @@ use crate::error::Result;
 #[cfg(test)]
 use mockall::automock;
 
+// A trait object is required because mockall can't handle `Result<impl Trait>` (in return
+// position) just yet. Otherwise we should be able to get by with `impl AsyncRead + Send + Unpin`.
+pub type GitAsyncRead = Box<dyn AsyncRead + Send + Unpin>;
+
 #[derive(Default, Debug)]
 pub struct Git {}
-
-type AsyncOutput = Box<dyn AsyncRead + Send + Sync + 'static>;
-
-fn exited_ok_with_stdout(
-    output: Output,
-    process_name: &'static str,
-    error_message: &'static str,
-) -> Result<Vec<u8>> {
-    if !output.status.success() {
-        tracing::error!(
-            status = output.status.into_raw(),
-            stderr = String::from_utf8_lossy(&output.stderr).into_owned(),
-            "`{}` exited with non-zero status",
-            process_name
-        );
-        return Err(anyhow!(error_message).into());
-    }
-    Ok(output.stdout)
-}
 
 #[cfg_attr(test, automock, allow(dead_code))]
 impl Git {
@@ -102,7 +87,7 @@ impl Git {
         Ok(())
     }
 
-    pub fn advertise_refs(&self, local: PathBuf) -> Result<AsyncOutput> {
+    pub fn advertise_refs(&self, local: PathBuf) -> Result<GitAsyncRead> {
         let mut child = Command::new("git-upload-pack")
             .arg("--stateless-rpc")
             .arg("--http-backend-info-refs")
@@ -133,11 +118,10 @@ impl Git {
             };
         });
 
-        // TODO: try to unbox
         Ok(Box::new(stdout))
     }
 
-    pub async fn upload_pack(&self, local: PathBuf, input: Bytes) -> Result<AsyncOutput> {
+    pub async fn upload_pack(&self, local: PathBuf, input: Bytes) -> Result<GitAsyncRead> {
         let mut child = Command::new("git-upload-pack")
             .arg("--stateless-rpc")
             .arg(local)
@@ -185,7 +169,23 @@ impl Git {
             };
         });
 
-        // TODO: try to unbox
         Ok(Box::new(stdout))
     }
+}
+
+fn exited_ok_with_stdout(
+    output: Output,
+    process_name: &'static str,
+    error_message: &'static str,
+) -> Result<Vec<u8>> {
+    if !output.status.success() {
+        tracing::error!(
+            status = output.status.into_raw(),
+            stderr = String::from_utf8_lossy(&output.stderr).into_owned(),
+            "`{}` exited with non-zero status",
+            process_name
+        );
+        return Err(anyhow!(error_message).into());
+    }
+    Ok(output.stdout)
 }

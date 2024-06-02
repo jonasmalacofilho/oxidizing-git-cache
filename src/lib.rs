@@ -6,7 +6,7 @@ use anyhow::Context;
 use error::{Error, Result};
 use http_body_util::BodyExt;
 use tokio::fs;
-use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
 use tokio_util::io::ReaderStream;
 
@@ -21,13 +21,15 @@ use tracing::{info, instrument};
 
 use clap::Parser;
 
-mod error;
-mod git;
+use crate::git::GitAsyncRead;
 
 #[cfg(not(test))]
 use crate::git::Git;
 #[cfg(test)]
 use crate::git::MockGit as Git;
+
+mod error;
+mod git;
 
 /// A caching Git HTTP server.
 ///
@@ -113,15 +115,12 @@ impl Repo {
     }
 
     #[instrument(level = "debug", skip_all)]
-    pub fn advertise_refs(&mut self) -> Result<Box<dyn AsyncRead + Send + Sync + 'static>> {
+    pub fn advertise_refs(&mut self) -> Result<GitAsyncRead> {
         self.git.advertise_refs(self.local.clone())
     }
 
     #[instrument(level = "debug", skip_all)]
-    pub async fn upload_pack(
-        &mut self,
-        input: Bytes,
-    ) -> Result<Box<dyn AsyncRead + Send + Sync + 'static>> {
+    pub async fn upload_pack(&mut self, input: Bytes) -> Result<GitAsyncRead> {
         self.git.upload_pack(self.local.clone(), input).await
     }
 }
@@ -190,7 +189,7 @@ async fn handle_ref_discovery(mut repo: Repo) -> Result<Response> {
     repo.fetch().await?;
 
     // Advertise refs to client.
-    let stdout = Box::into_pin(repo.advertise_refs()?);
+    let stdout = repo.advertise_refs()?;
     let output = b"001e# service=git-upload-pack\n0000".chain(stdout);
     let output = ReaderStream::new(output);
     Ok((
@@ -226,7 +225,7 @@ async fn handle_upload_pack(mut repo: Repo, request: Request) -> Result<Response
         .await
         .context("failed to collect the request body")?
         .to_bytes();
-    let output = Box::into_pin(repo.upload_pack(input).await?);
+    let output = repo.upload_pack(input).await?;
     let output = ReaderStream::new(output);
     Ok((
         StatusCode::OK,
