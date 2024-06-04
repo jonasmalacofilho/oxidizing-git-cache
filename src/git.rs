@@ -7,6 +7,7 @@ use axum::body::Bytes;
 use axum::http::Uri;
 use tokio::io::{AsyncRead, AsyncWriteExt};
 use tokio::process::Command;
+use tracing::{instrument, Instrument};
 
 use crate::error::Result;
 
@@ -22,6 +23,7 @@ pub struct Git {}
 
 #[cfg_attr(test, automock, allow(dead_code))]
 impl Git {
+    #[instrument(skip(self))]
     pub async fn init(&self, local: PathBuf) -> Result<()> {
         let output = Command::new("git")
             .arg("init")
@@ -38,8 +40,10 @@ impl Git {
         Ok(())
     }
 
+    #[instrument(skip(self))]
     pub async fn remote_head(&self, upstream: Uri) -> Result<String> {
         // HACK: this is a quite brittle and inneficient way to get the remote HEAD
+        // TODO: handle non-existant repositories
         // TODO: handle a valid but empty remote with no refs
 
         let output = Command::new("git")
@@ -66,6 +70,7 @@ impl Git {
             .to_owned())
     }
 
+    #[instrument(skip(self))]
     pub async fn fetch(&self, upstream: Uri, local: PathBuf) -> Result<()> {
         // TODO: set up authentication
 
@@ -87,6 +92,7 @@ impl Git {
         Ok(())
     }
 
+    #[instrument(skip(self))]
     pub fn advertise_refs(&self, local: PathBuf) -> Result<GitAsyncRead> {
         let mut child = Command::new("git-upload-pack")
             .arg("--stateless-rpc")
@@ -104,23 +110,29 @@ impl Git {
         // spawn a separete task to wait for and reape the child process when its done, instead of
         // relying on tokio doing that on a best-effort-only basis. This also allow us to log any
         // errors.
-        tokio::spawn(async move {
-            let output = child
-                .wait_with_output()
-                .await
-                .expect("failed to wait for `git-upload-pack` to exit");
-            if !output.status.success() {
-                tracing::error!(
-                    status = output.status.into_raw(),
-                    stderr = String::from_utf8_lossy(&output.stderr).into_owned(),
-                    "`git-upload-pack` exited with non-zero status",
-                );
+        tokio::spawn(
+            async move {
+                let output = child
+                    .wait_with_output()
+                    .await
+                    .expect("failed to wait for `git-upload-pack` to exit");
+                if !output.status.success() {
+                    tracing::error!(
+                        status = output.status.into_raw(),
+                        stderr = String::from_utf8_lossy(&output.stderr).into_owned(),
+                        "`git-upload-pack` exited with non-zero status",
+                    );
+                } else {
+                    tracing::trace!("`git-upload-pack` exited with 0");
+                }
             }
-        });
+            .in_current_span(),
+        );
 
         Ok(Box::new(stdout))
     }
 
+    #[instrument(skip(self, input))]
     pub async fn upload_pack(&self, local: PathBuf, input: Bytes) -> Result<GitAsyncRead> {
         let mut child = Command::new("git-upload-pack")
             .arg("--stateless-rpc")
@@ -145,29 +157,39 @@ impl Git {
         // current git op abstraction, it wouldn't be possible to do it (changing the abstraction
         // is hard because it has to be easily mockable in tests). So instead just log any such
         // errors.
-        tokio::spawn(async move {
-            if let Err(err) = stdin.write_all(&input).await {
-                tracing::error!(error = ?err, "i/o error while writing to git-upload-pack");
+        tokio::spawn(
+            async move {
+                if let Err(err) = stdin.write_all(&input).await {
+                    tracing::error!(error = ?err, "i/o error while writing to git-upload-pack");
+                } else {
+                    tracing::trace!("done writing to `git-upload-pack`");
+                }
             }
-        });
+            .in_current_span(),
+        );
 
         // The stdout output will be handed off to axum to transmit it to the client. Therefore,
         // spawn a separete task to wait for and reape the child process when its done, instead of
         // relying on tokio doing that on a best-effort-only basis. This also allow us to log any
         // errors.
-        tokio::spawn(async move {
-            let output = child
-                .wait_with_output()
-                .await
-                .expect("failed to wait for `git-upload-pack` to exit");
-            if !output.status.success() {
-                tracing::error!(
-                    status = output.status.into_raw(),
-                    stderr = String::from_utf8_lossy(&output.stderr).into_owned(),
-                    "`git-upload-pack` exited with non-zero status",
-                );
+        tokio::spawn(
+            async move {
+                let output = child
+                    .wait_with_output()
+                    .await
+                    .expect("failed to wait for `git-upload-pack` to exit");
+                if !output.status.success() {
+                    tracing::error!(
+                        status = output.status.into_raw(),
+                        stderr = String::from_utf8_lossy(&output.stderr).into_owned(),
+                        "`git-upload-pack` exited with non-zero status",
+                    );
+                } else {
+                    tracing::trace!("`git-upload-pack` exited with 0");
+                }
             }
-        });
+            .in_current_span(),
+        );
 
         Ok(Box::new(stdout))
     }
@@ -182,10 +204,11 @@ fn exited_ok_with_stdout(
         tracing::error!(
             status = output.status.into_raw(),
             stderr = String::from_utf8_lossy(&output.stderr).into_owned(),
-            "`{}` exited with non-zero status",
-            process_name
+            "`{process_name}` exited with non-zero status",
         );
         return Err(anyhow!(error_message).into());
+    } else {
+        tracing::trace!("`{process_name}` exited with 0");
     }
     Ok(output.stdout)
 }

@@ -1,35 +1,37 @@
 use std::io;
+use std::iter::once;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Context;
-use error::{Error, Result};
+use axum::body::{Body, Bytes};
+use axum::extract::{Request, State};
+use axum::http::header::AUTHORIZATION;
+use axum::http::{Method, StatusCode, Uri};
+use axum::response::{IntoResponse, Response};
+use axum::routing::any;
+use axum::Router;
+use clap::Parser;
 use http_body_util::BodyExt;
 use tokio::fs;
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
 use tokio_util::io::ReaderStream;
-
-use axum::body::{Body, Bytes};
-use axum::extract::{Request, State};
-use axum::http::{Method, StatusCode, Uri};
-use axum::response::{IntoResponse, Response};
-use axum::routing::any;
-use axum::Router;
-
-use tracing::{info, instrument};
-
-use clap::Parser;
-
-use crate::git::GitAsyncRead;
-
-#[cfg(not(test))]
-use crate::git::Git;
-#[cfg(test)]
-use crate::git::MockGit as Git;
+use tower::ServiceBuilder;
+use tower_http::request_id::MakeRequestUuid;
+use tower_http::sensitive_headers::SetSensitiveRequestHeadersLayer;
+use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
+use tower_http::ServiceBuilderExt;
 
 mod error;
 mod git;
+
+use crate::error::{Error, Result};
+
+#[cfg(not(test))]
+use crate::git::{Git, GitAsyncRead};
+#[cfg(test)]
+use crate::git::{GitAsyncRead, MockGit as Git};
 
 /// A caching Git HTTP server.
 ///
@@ -46,12 +48,11 @@ pub struct Options {
     port: u16,
 }
 
-#[instrument(level = "debug", skip_all)]
 pub async fn start(options: &Options) -> io::Result<()> {
     let app = app(options, Git::default()).await?;
 
     let listener = TcpListener::bind(("0.0.0.0", options.port)).await?;
-    info!("Listening on {}", listener.local_addr()?);
+    tracing::info!("Listening on {}", listener.local_addr()?);
 
     axum::serve(listener, app).await
 }
@@ -67,7 +68,6 @@ impl Index {
         Self { cache_dir, git }
     }
 
-    #[instrument(level = "debug", skip_all)]
     async fn open(&self, upstream: Uri) -> Result<Repo> {
         // FIXME: upstream must be sanitized:
         // - upstreams that escape out of the cache-dir
@@ -101,7 +101,6 @@ pub struct Repo {
 }
 
 impl Repo {
-    #[instrument(level = "debug", skip_all)]
     pub async fn fetch(&mut self) -> Result<()> {
         // Assume we (the server) has a modern git that supports symrefs.
         let remote_head = self.git.remote_head(self.upstream.clone()).await?;
@@ -114,33 +113,41 @@ impl Repo {
             .await
     }
 
-    #[instrument(level = "debug", skip_all)]
     pub fn advertise_refs(&mut self) -> Result<GitAsyncRead> {
         self.git.advertise_refs(self.local.clone())
     }
 
-    #[instrument(level = "debug", skip_all)]
     pub async fn upload_pack(&mut self, input: Bytes) -> Result<GitAsyncRead> {
         self.git.upload_pack(self.local.clone(), input).await
     }
 }
 
-#[instrument(level = "debug", skip_all)]
 async fn app(options: &Options, git: Git) -> io::Result<Router> {
     // Ensure `cache_dir` exists and acquire a lock on it.
     fs::create_dir_all(&options.cache_dir).await?;
     fs::write(&options.cache_dir.join(".git-cache"), "").await?; // FIXME: lock
-    info!("Cache directory is {:?}", options.cache_dir);
+    tracing::info!("Cache directory is {:?}", options.cache_dir);
 
     let repos = Index::new(options.cache_dir.clone(), Arc::new(git));
 
     // TODO: delegate more to the axum router
     Ok(Router::new()
         .route("/*req", any(router))
-        .with_state(Arc::new(repos)))
+        .with_state(Arc::new(repos))
+        .layer(
+            ServiceBuilder::new()
+                // WARN: Will *not* overwrite `x-request-id` if already present.
+                .set_x_request_id(MakeRequestUuid)
+                .layer(SetSensitiveRequestHeadersLayer::new(once(AUTHORIZATION)))
+                .layer(
+                    TraceLayer::new_for_http()
+                        .make_span_with(DefaultMakeSpan::new().include_headers(true))
+                        .on_response(DefaultOnResponse::new().include_headers(true)),
+                )
+                .propagate_x_request_id(),
+        ))
 }
 
-#[instrument(level = "debug", skip_all)]
 async fn router(State(repos): State<Arc<Index>>, request: Request<Body>) -> Result<Response> {
     // TODO: extract credentials
 
@@ -181,7 +188,6 @@ async fn router(State(repos): State<Arc<Index>>, request: Request<Body>) -> Resu
     }
 }
 
-#[instrument(level = "debug", ret)]
 async fn handle_ref_discovery(mut repo: Repo) -> Result<Response> {
     // TODO: authenticate on upstream
 
@@ -206,7 +212,6 @@ async fn handle_ref_discovery(mut repo: Repo) -> Result<Response> {
         .into_response())
 }
 
-#[instrument(level = "debug")]
 async fn handle_upload_pack(mut repo: Repo, request: Request) -> Result<Response> {
     // TODO: authenticate on upstream
 
