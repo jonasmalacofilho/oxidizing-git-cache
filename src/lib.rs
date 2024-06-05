@@ -18,6 +18,7 @@ use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
 use tokio_util::io::ReaderStream;
 use tower::ServiceBuilder;
+use tower_http::decompression::RequestDecompressionLayer;
 use tower_http::request_id::MakeRequestUuid;
 use tower_http::sensitive_headers::SetSensitiveRequestHeadersLayer;
 use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
@@ -144,6 +145,7 @@ async fn app(options: &Options, git: Git) -> io::Result<Router> {
                         .make_span_with(DefaultMakeSpan::new().include_headers(true))
                         .on_response(DefaultOnResponse::new().include_headers(true)),
                 )
+                .layer(RequestDecompressionLayer::new())
                 .propagate_x_request_id(),
         ))
 }
@@ -220,8 +222,7 @@ async fn handle_upload_pack(mut repo: Repo, request: Request) -> Result<Response
     // outdated or no data.
 
     // FIXME: missing any type of safety limit on the body size
-    // FIXME: can't deal with large wants, which are gzip compressed
-    // TODO: replace with piping client body straight into git-upload-pack stdin
+    // TODO: pipe the client body into git-upload-pack stdin instead of reading all beforehand
 
     // Proxy git-upload-pack.
     let input = request
@@ -245,6 +246,10 @@ async fn handle_upload_pack(mut repo: Repo, request: Request) -> Result<Response
 
 #[cfg(test)]
 mod unit_tests {
+    use std::io::Write;
+
+    use axum::http::header;
+    use flate2::{write::GzEncoder, Compression};
     use http_body_util::BodyExt;
     use mockall::predicate::eq;
     use tempfile::tempdir;
@@ -421,6 +426,50 @@ mod unit_tests {
             Vec::from_iter(response.headers().get_all("cache-control").into_iter()),
             ["no-cache"]
         );
+
+        assert_eq!(
+            response.into_body().collect().await.unwrap().to_bytes(),
+            "mock git-upload-pack output"
+        );
+    }
+
+    #[tokio::test]
+    async fn compressed_upload_pack_request() {
+        let config = Options {
+            cache_dir: tempdir().unwrap().into_path(),
+            port: 0,
+        };
+
+        // TODO: check sequence of git ops?
+        let mut mock_git = Git::default();
+
+        mock_git.expect_init().times(1).returning(|_| Ok(()));
+
+        mock_git
+            .expect_upload_pack()
+            .with(
+                eq(config.cache_dir.join("example.com/a/b/c.git")),
+                eq(Bytes::from("mock client input: 42")),
+            )
+            .times(1)
+            .returning(|_, _| Ok(Box::new("mock git-upload-pack output".as_bytes())));
+
+        let app = app(&config, mock_git).await.unwrap();
+
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(b"mock client input: 42").unwrap();
+
+        let response = app
+            .oneshot(
+                Request::post("/example.com/a/b/c/git-upload-pack")
+                    .header(header::CONTENT_ENCODING, "gzip")
+                    .body(Body::from(encoder.finish().unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
 
         assert_eq!(
             response.into_body().collect().await.unwrap().to_bytes(),
