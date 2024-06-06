@@ -14,10 +14,10 @@ axum-macros = "0.4.1"
 clap = { version = "4.5.4", features = ["derive"] }
 futures-util = "0.3.30"
 http-body-util = "0.1.1"
-serde = { version = "1.0.198", features = ["derive"] }
+serde = { version = "1.0.203", features = ["derive"] }
 thiserror = "1.0.61"
-tokio = { version = "1.37.0", features = ["full"] }
-tokio-util = { version = "0.7.10", features = ["io"] }
+tokio = { version = "1.38.0", features = ["full"] }
+tokio-util = { version = "0.7.11", features = ["io"] }
 tower = "0.4.13"
 tower-http = { version = "0.5.2", features = ["request-id", "sensitive-headers", "set-header", "trace", "util", "decompression-gzip"] }
 tracing = "0.1.40"
