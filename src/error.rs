@@ -20,8 +20,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub enum Error {
     #[error("not found")]
     NotFound,
-    #[error("bad request")]
-    BadRequest,
+    //#[error("bad request")]
+    //BadRequest,
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -39,7 +39,7 @@ impl IntoResponse for Error {
                     .into_response()
             }
             Error::NotFound => StatusCode::NOT_FOUND.into_response(),
-            Error::BadRequest => StatusCode::BAD_REQUEST.into_response(),
+            //Error::BadRequest => StatusCode::BAD_REQUEST.into_response(),
         }
     }
 }

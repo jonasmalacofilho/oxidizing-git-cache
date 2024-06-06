@@ -1,7 +1,7 @@
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::{collections::hash_map::Entry, path::Path};
 
 use anyhow::Context;
 use axum::body::Bytes;
