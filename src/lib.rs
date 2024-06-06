@@ -128,7 +128,7 @@ async fn router(State(repos): State<Arc<Index>>, request: Request<Body>) -> Resu
     }
 }
 
-async fn handle_ref_discovery(mut repo: Arc<Mutex<Repo>>) -> Result<Response> {
+async fn handle_ref_discovery(repo: Arc<Mutex<Repo>>) -> Result<Response> {
     // TODO: authenticate on upstream
 
     // FIXME: should only drop this guard after child git-upload-pack exits.
@@ -155,7 +155,7 @@ async fn handle_ref_discovery(mut repo: Arc<Mutex<Repo>>) -> Result<Response> {
         .into_response())
 }
 
-async fn handle_upload_pack(mut repo: Arc<Mutex<Repo>>, request: Request) -> Result<Response> {
+async fn handle_upload_pack(repo: Arc<Mutex<Repo>>, request: Request) -> Result<Response> {
     // TODO: authenticate on upstream
 
     // FIXME: should only drop this guard after child git-upload-pack exits.
@@ -197,7 +197,6 @@ mod unit_tests {
     use http_body_util::BodyExt;
     use mockall::predicate::eq;
     use tempfile::tempdir;
-
     use tower::{Service, ServiceExt};
 
     use super::*;
@@ -287,7 +286,7 @@ mod unit_tests {
         // TODO: check sequence of git ops?
         let mut mock_git = Git::default();
 
-        mock_git.expect_init().times(1..=2).returning(|_| Ok(()));
+        mock_git.expect_init().times(1).returning(|_| Ok(()));
 
         mock_git
             .expect_remote_head()
@@ -425,34 +424,6 @@ mod unit_tests {
     #[ignore]
     async fn authentication() {
         todo!()
-    }
-
-    #[tokio::test]
-    async fn repo_mutual_exclusion() {
-        let cache_dir = tempdir().unwrap().into_path();
-        let mut mock_git = Git::default();
-
-        mock_git.expect_init().times(2).returning(|_| Ok(()));
-
-        let index = Index::new(cache_dir, mock_git);
-
-        let a = index
-            .open("https://example.com/a/b/c".parse().unwrap())
-            .await
-            .unwrap();
-        let b = index
-            .open("https://example.com/a/b/c.git".parse().unwrap())
-            .await
-            .unwrap();
-        let c = index
-            .open("https://example.com/X/Y/Z.git".parse().unwrap())
-            .await
-            .unwrap();
-
-        let lock_a = a.lock().await;
-        assert!(b.try_lock().is_err());
-        assert!(c.try_lock().is_ok());
-        drop(lock_a);
     }
 
     // TODO: support or at least don't break with git protocol v2

@@ -96,3 +96,38 @@ impl Repo {
         self.git.upload_pack(self.local.clone(), input).await
     }
 }
+
+#[cfg(test)]
+mod unit_tests {
+    use tempfile::tempdir;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn repo_mutual_exclusion() {
+        let cache_dir = tempdir().unwrap().into_path();
+        let mut mock_git = Git::default();
+
+        mock_git.expect_init().times(2).returning(|_| Ok(()));
+
+        let index = Index::new(cache_dir, mock_git);
+
+        let a = index
+            .open("https://example.com/a/b/c".parse().unwrap())
+            .await
+            .unwrap();
+        let b = index
+            .open("https://example.com/a/b/c.git".parse().unwrap())
+            .await
+            .unwrap();
+        let c = index
+            .open("https://example.com/X/Y/Z.git".parse().unwrap())
+            .await
+            .unwrap();
+
+        let lock_a = a.lock().await;
+        assert!(b.try_lock().is_err());
+        assert!(c.try_lock().is_ok());
+        drop(lock_a);
+    }
+}
