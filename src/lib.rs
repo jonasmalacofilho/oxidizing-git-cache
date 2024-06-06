@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Context;
-use axum::body::{Body, Bytes};
+use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::http::header::AUTHORIZATION;
 use axum::http::{Method, StatusCode, Uri};
@@ -16,6 +16,7 @@ use http_body_util::BodyExt;
 use tokio::fs;
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
+use tokio::sync::Mutex;
 use tokio_util::io::ReaderStream;
 use tower::ServiceBuilder;
 use tower_http::decompression::RequestDecompressionLayer;
@@ -26,13 +27,15 @@ use tower_http::ServiceBuilderExt;
 
 mod error;
 mod git;
+mod index;
 
 use crate::error::{Error, Result};
+use crate::index::{Index, Repo};
 
 #[cfg(not(test))]
-use crate::git::{Git, GitAsyncRead};
+use crate::git::Git;
 #[cfg(test)]
-use crate::git::{GitAsyncRead, MockGit as Git};
+use crate::git::MockGit as Git;
 
 /// A caching Git HTTP server.
 ///
@@ -58,83 +61,18 @@ pub async fn start(options: &Options) -> io::Result<()> {
     axum::serve(listener, app).await
 }
 
-#[derive(Debug)]
-struct Index {
-    cache_dir: PathBuf,
-    git: Arc<Git>,
-}
-
-impl Index {
-    fn new(cache_dir: PathBuf, git: Arc<Git>) -> Self {
-        Self { cache_dir, git }
-    }
-
-    async fn open(&self, upstream: Uri) -> Result<Repo> {
-        // FIXME: upstream must be sanitized:
-        // - upstreams that escape out of the cache-dir
-        // - upstreams that turn into subpaths of existing cached repos
-        // - upstreams that result in absolute-looking paths being feed into Path::join
-
-        let local = self
-            .cache_dir
-            .join(upstream.host().ok_or(Error::NotFound)?)
-            .join(&upstream.path()[1..])
-            .with_extension("git");
-
-        fs::create_dir_all(&local)
-            .await
-            .context("failed to create directory for repository")?;
-        self.git.init(local.clone()).await?;
-
-        Ok(Repo {
-            git: self.git.clone(),
-            upstream: upstream.clone(),
-            local,
-        })
-    }
-}
-
-#[derive(Debug)]
-pub struct Repo {
-    git: Arc<Git>,
-    upstream: Uri,
-    local: PathBuf,
-}
-
-impl Repo {
-    pub async fn fetch(&mut self) -> Result<()> {
-        // Assume we (the server) has a modern git that supports symrefs.
-        let remote_head = self.git.remote_head(self.upstream.clone()).await?;
-        tokio::fs::write(self.local.join("HEAD"), remote_head)
-            .await
-            .context("failed to update HEAD")?;
-
-        self.git
-            .fetch(self.upstream.clone(), self.local.clone())
-            .await
-    }
-
-    pub fn advertise_refs(&mut self) -> Result<GitAsyncRead> {
-        self.git.advertise_refs(self.local.clone())
-    }
-
-    pub async fn upload_pack(&mut self, input: Bytes) -> Result<GitAsyncRead> {
-        self.git.upload_pack(self.local.clone(), input).await
-    }
-}
-
 async fn app(options: &Options, git: Git) -> io::Result<Router> {
     // Ensure `cache_dir` exists and acquire a lock on it.
     fs::create_dir_all(&options.cache_dir).await?;
     fs::write(&options.cache_dir.join(".git-cache"), "").await?; // FIXME: lock
     tracing::info!("Cache directory is {:?}", options.cache_dir);
 
-    let repos = Index::new(options.cache_dir.clone(), Arc::new(git));
+    let index = Index::new(options.cache_dir.clone(), git);
 
     // TODO: delegate more to the axum router
     Ok(Router::new()
         .route("/*req", any(router))
-        .with_state(Arc::new(repos))
+        .with_state(Arc::new(index))
         .layer(
             ServiceBuilder::new()
                 // WARN: Will *not* overwrite `x-request-id` if already present.
@@ -190,8 +128,11 @@ async fn router(State(repos): State<Arc<Index>>, request: Request<Body>) -> Resu
     }
 }
 
-async fn handle_ref_discovery(mut repo: Repo) -> Result<Response> {
+async fn handle_ref_discovery(mut repo: Arc<Mutex<Repo>>) -> Result<Response> {
     // TODO: authenticate on upstream
+
+    // FIXME: should only drop this guard after child git-upload-pack exits.
+    let mut repo = repo.lock().await;
 
     // Clone or update local copy from upstream.
     repo.fetch().await?;
@@ -214,8 +155,11 @@ async fn handle_ref_discovery(mut repo: Repo) -> Result<Response> {
         .into_response())
 }
 
-async fn handle_upload_pack(mut repo: Repo, request: Request) -> Result<Response> {
+async fn handle_upload_pack(mut repo: Arc<Mutex<Repo>>, request: Request) -> Result<Response> {
     // TODO: authenticate on upstream
+
+    // FIXME: should only drop this guard after child git-upload-pack exits.
+    let mut repo = repo.lock().await;
 
     // Assume this request immediately follows a ref-discovery step, in which we updated our copy
     // of the repository. If this isn't the case (if the client is broken), we'll simply reply with
@@ -248,7 +192,7 @@ async fn handle_upload_pack(mut repo: Repo, request: Request) -> Result<Response
 mod unit_tests {
     use std::io::Write;
 
-    use axum::http::header;
+    use axum::{body::Bytes, http::header};
     use flate2::{write::GzEncoder, Compression};
     use http_body_util::BodyExt;
     use mockall::predicate::eq;
@@ -481,6 +425,34 @@ mod unit_tests {
     #[ignore]
     async fn authentication() {
         todo!()
+    }
+
+    #[tokio::test]
+    async fn repo_mutual_exclusion() {
+        let cache_dir = tempdir().unwrap().into_path();
+        let mut mock_git = Git::default();
+
+        mock_git.expect_init().times(2).returning(|_| Ok(()));
+
+        let index = Index::new(cache_dir, mock_git);
+
+        let a = index
+            .open("https://example.com/a/b/c".parse().unwrap())
+            .await
+            .unwrap();
+        let b = index
+            .open("https://example.com/a/b/c.git".parse().unwrap())
+            .await
+            .unwrap();
+        let c = index
+            .open("https://example.com/X/Y/Z.git".parse().unwrap())
+            .await
+            .unwrap();
+
+        let lock_a = a.lock().await;
+        assert!(b.try_lock().is_err());
+        assert!(c.try_lock().is_ok());
+        drop(lock_a);
     }
 
     // TODO: support or at least don't break with git protocol v2
