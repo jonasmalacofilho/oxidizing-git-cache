@@ -52,6 +52,7 @@ impl Index {
                 fs::create_dir_all(&local)
                     .await
                     .context("failed to create directory for repository")?;
+
                 self.git.init(local.clone()).await?;
 
                 let repo = Arc::new(Mutex::new(Repo {
@@ -98,13 +99,13 @@ impl Repo {
 }
 
 #[cfg(test)]
-mod unit_tests {
+mod tests {
     use tempfile::tempdir;
 
     use super::*;
 
     #[tokio::test]
-    async fn repo_mutual_exclusion() {
+    async fn mutual_exclusion() {
         let cache_dir = tempdir().unwrap().into_path();
         let mut mock_git = Git::default();
 
