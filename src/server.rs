@@ -1,5 +1,6 @@
 use std::io;
 use std::iter::once;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Context;
@@ -10,6 +11,7 @@ use axum::http::{Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
 use axum::Router;
+use clap::Parser;
 use http_body_util::BodyExt;
 use tokio::fs;
 use tokio::io::AsyncReadExt;
@@ -25,12 +27,26 @@ use tower_http::ServiceBuilderExt;
 
 use crate::error::{Error, Result};
 use crate::repo::{Index, Repo};
-use crate::Options;
 
 #[cfg(not(test))]
 use crate::git::Git;
 #[cfg(test)]
 use crate::git::MockGit as Git;
+
+/// A caching Git HTTP server.
+///
+/// Serve and update local mirrors of Git repositories over HTTP.
+#[derive(Clone, Debug, Parser)]
+#[command(version)]
+pub struct Options {
+    /// Location of the git cache.
+    #[arg(short, long, default_value = "/var/cache/git", name = "PATH")]
+    cache_dir: PathBuf,
+
+    /// Bind to port.
+    #[arg(short, long, default_value = "8080")]
+    port: u16,
+}
 
 pub async fn start(options: &Options) -> io::Result<()> {
     let app = app(options, Git::default()).await?;

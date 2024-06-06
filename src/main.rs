@@ -4,7 +4,7 @@ use clap::Parser;
 //use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::EnvFilter;
 
-use git_cache_http_server::{start, Options};
+use git_cache_http_server::server::{start, Options};
 
 #[tokio::main]
 async fn main() -> Result<()> {
