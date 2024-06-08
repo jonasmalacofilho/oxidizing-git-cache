@@ -125,15 +125,17 @@ async fn router(State(repos): State<Arc<Index>>, request: Request<Body>) -> Resu
 }
 
 async fn handle_ref_discovery(repo: Arc<Mutex<Repo>>) -> Result<Response> {
-    // TODO: authenticate on upstream
-
     // FIXME: should only drop this guard after child git-upload-pack exits.
     let mut repo = repo.lock().await;
 
+    // Authenticate and fetch the remote head (if available).
+    let remote_head = repo.authenticate_with_head().await?;
+
     // Clone or update local copy from upstream.
-    repo.fetch().await?;
+    repo.fetch(remote_head).await?;
 
     // Advertise refs to client.
+    // TODO: add `000dversion 1` if request contains `Git-Protocol: version=1`.
     let stdout = repo.advertise_refs()?;
     let output = b"001e# service=git-upload-pack\n0000".chain(stdout);
     let output = ReaderStream::new(output);
@@ -152,10 +154,11 @@ async fn handle_ref_discovery(repo: Arc<Mutex<Repo>>) -> Result<Response> {
 }
 
 async fn handle_upload_pack(repo: Arc<Mutex<Repo>>, request: Request) -> Result<Response> {
-    // TODO: authenticate on upstream
-
     // FIXME: should only drop this guard after child git-upload-pack exits.
-    let mut repo = repo.lock().await;
+    let repo = repo.lock().await;
+
+    // Authenticate (discard the remote head).
+    let _ = repo.authenticate_with_head().await?;
 
     // Assume this request immediately follows a ref-discovery step, in which we updated our copy
     // of the repository. If this isn't the case (if the client is broken), we'll simply reply with
@@ -214,10 +217,10 @@ mod tests {
             .returning(|_| Ok(()));
 
         mock_git
-            .expect_remote_head()
+            .expect_authenticate_with_head()
             .with(eq(Uri::from_static("https://example.com/a/b/c")))
             .times(1)
-            .returning(|_| Ok(String::from("ref: refs/heads/mock")));
+            .returning(|_| Ok(Some(String::from("refs/heads/mock"))));
 
         mock_git
             .expect_fetch()
@@ -285,9 +288,9 @@ mod tests {
         mock_git.expect_init().times(1).returning(|_| Ok(()));
 
         mock_git
-            .expect_remote_head()
+            .expect_authenticate_with_head()
             .times(2)
-            .returning(|_| Ok(String::from("ref: refs/heads/mock")));
+            .returning(|_| Ok(Some(String::from("refs/heads/mock"))));
 
         mock_git.expect_fetch().times(2).returning(|_, _| Ok(()));
 
@@ -335,6 +338,12 @@ mod tests {
         mock_git.expect_init().times(1).returning(|_| Ok(()));
 
         mock_git
+            .expect_authenticate_with_head()
+            .with(eq(Uri::from_static("https://example.com/a/b/c")))
+            .times(1)
+            .returning(|_| Ok(None));
+
+        mock_git
             .expect_upload_pack()
             .with(
                 eq(config.cache_dir.join("example.com/a/b/c.git")),
@@ -374,6 +383,8 @@ mod tests {
 
     #[tokio::test]
     async fn compressed_upload_pack_request() {
+        // NOTE: Assumes that basic uplaod_pack without compressed requests has passed.
+
         let config = Options {
             cache_dir: tempdir().unwrap().into_path(),
             port: 0,
@@ -383,6 +394,11 @@ mod tests {
         let mut mock_git = Git::default();
 
         mock_git.expect_init().times(1).returning(|_| Ok(()));
+
+        mock_git
+            .expect_authenticate_with_head()
+            .times(1)
+            .returning(|_| Ok(None));
 
         mock_git
             .expect_upload_pack()
@@ -419,6 +435,12 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn authentication() {
+        todo!()
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn non_existent_repository() {
         todo!()
     }
 

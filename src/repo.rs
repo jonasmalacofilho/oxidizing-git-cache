@@ -77,23 +77,28 @@ pub struct Repo {
 }
 
 impl Repo {
-    pub async fn fetch(&mut self) -> Result<()> {
+    pub async fn authenticate_with_head(&self) -> Result<Option<String>> {
         // Assume we (the server) has a modern git that supports symrefs.
-        let remote_head = self.git.remote_head(self.upstream.clone()).await?;
-        tokio::fs::write(self.local.join("HEAD"), remote_head)
-            .await
-            .context("failed to update HEAD")?;
+        self.git.authenticate_with_head(self.upstream.clone()).await
+    }
+
+    pub async fn fetch(&mut self, remote_head: Option<String>) -> Result<()> {
+        if let Some(remote_head) = remote_head {
+            tokio::fs::write(self.local.join("HEAD"), format!("ref: {remote_head}"))
+                .await
+                .context("failed to update HEAD")?;
+        }
 
         self.git
             .fetch(self.upstream.clone(), self.local.clone())
             .await
     }
 
-    pub fn advertise_refs(&mut self) -> Result<GitAsyncRead> {
+    pub fn advertise_refs(&self) -> Result<GitAsyncRead> {
         self.git.advertise_refs(self.local.clone())
     }
 
-    pub async fn upload_pack(&mut self, input: Bytes) -> Result<GitAsyncRead> {
+    pub async fn upload_pack(&self, input: Bytes) -> Result<GitAsyncRead> {
         self.git.upload_pack(self.local.clone(), input).await
     }
 }

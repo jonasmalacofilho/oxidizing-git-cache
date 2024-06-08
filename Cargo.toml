@@ -10,10 +10,10 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0.86"
 axum = "0.7.5"
-axum-macros = "0.4.1"
 clap = { version = "4.5.4", features = ["derive"] }
 futures-util = "0.3.30"
 http-body-util = "0.1.1"
+reqwest = "0.12.4"
 serde = { version = "1.0.203", features = ["derive"] }
 thiserror = "1.0.61"
 tokio = { version = "1.38.0", features = ["full"] }

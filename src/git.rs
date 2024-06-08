@@ -2,14 +2,15 @@ use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
 use std::process::{Output, Stdio};
 
-use anyhow::{anyhow, Context};
+use anyhow::{anyhow, ensure, Context};
 use axum::body::Bytes;
 use axum::http::Uri;
+use reqwest::StatusCode;
 use tokio::io::{AsyncRead, AsyncWriteExt};
 use tokio::process::Command;
 use tracing::{instrument, Instrument};
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 
 #[cfg(test)]
 use mockall::automock;
@@ -41,33 +42,31 @@ impl Git {
     }
 
     #[instrument(skip(self))]
-    pub async fn remote_head(&self, upstream: Uri) -> Result<String> {
-        // HACK: this is a quite brittle and inneficient way to get the remote HEAD
-        // TODO: handle non-existant repositories
-        // TODO: handle a valid but empty remote with no refs
+    pub async fn authenticate_with_head(&self, upstream: Uri) -> Result<Option<String>> {
+        // TODO: set up authentication
 
-        let output = Command::new("git")
-            .arg("ls-remote")
-            .arg("--symref")
-            .arg(upstream.to_string())
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .output()
+        let response = reqwest::get(format!("{upstream}/info/refs?service=git-upload-pack"))
             .await
-            .expect("failed to execute `git ls-remote`");
+            .context("failed to get upstream /info/refs")?;
 
-        let stdout = exited_ok_with_stdout(output, "git ls-remote", "failed to fetch remote refs")?;
+        match response.status() {
+            StatusCode::OK => { /* keep going */ }
+            StatusCode::NOT_FOUND | StatusCode::UNAUTHORIZED => return Err(Error::NotFound),
+            //StatusCode::UNAUTHORIZED => todo!(),
+            code => {
+                return Err(anyhow!("upstream responded to /info/refs with status {code}").into())
+            }
+        };
 
-        let refs =
-            String::from_utf8(stdout).context("output from `git ls-remote` is not valid utf-8")?;
+        // TODO: check content-type, we only support smart responses
 
-        Ok(refs
-            .lines()
-            .next()
-            .ok_or(anyhow!("failed to fetch remote refs"))?
-            .strip_suffix("\tHEAD")
-            .ok_or(anyhow!("failed to find HEAD in remote refs"))?
-            .to_owned())
+        let response = response
+            .bytes()
+            .await
+            .context("failed to read full response from upstream /info/refs")?;
+
+        Ok(parse_smart_refs(response)
+            .context("failed to parse response from upstream /info/refs")?)
     }
 
     #[instrument(skip(self))]
@@ -119,7 +118,7 @@ impl Git {
                 if !output.status.success() {
                     tracing::error!(
                         status = output.status.into_raw(),
-                        stderr = String::from_utf8_lossy(&output.stderr).into_owned(),
+                        stderr = ?Bytes::from(output.stderr),
                         "`git-upload-pack` exited with non-zero status",
                     );
                 } else {
@@ -181,7 +180,7 @@ impl Git {
                 if !output.status.success() {
                     tracing::error!(
                         status = output.status.into_raw(),
-                        stderr = String::from_utf8_lossy(&output.stderr).into_owned(),
+                        stderr = ?Bytes::from(output.stderr),
                         "`git-upload-pack` exited with non-zero status",
                     );
                 } else {
@@ -203,7 +202,7 @@ fn exited_ok_with_stdout(
     if !output.status.success() {
         tracing::error!(
             status = output.status.into_raw(),
-            stderr = String::from_utf8_lossy(&output.stderr).into_owned(),
+            stderr = ?Bytes::from(output.stderr),
             "`{process_name}` exited with non-zero status",
         );
         return Err(anyhow!(error_message).into());
@@ -211,4 +210,93 @@ fn exited_ok_with_stdout(
         tracing::trace!("`{process_name}` exited with 0");
     }
     Ok(output.stdout)
+}
+
+fn parse_smart_refs(input: Bytes) -> anyhow::Result<Option<String>> {
+    fn pkt_line(mut input: Bytes) -> anyhow::Result<(Bytes, Bytes)> {
+        let pkt_len = input.split_to(4);
+        if pkt_len == "0000" {
+            Ok((pkt_len, input))
+        } else {
+            // FIXME: subsctraction can overflow and panic/wraparound
+            let pkt_len = u16::from_str_radix(std::str::from_utf8(&pkt_len)?, 16)? - 4;
+            Ok((input.split_to(pkt_len.into()), input))
+        }
+    }
+
+    let (header, input) = pkt_line(input)?;
+    ensure!(header == "# service=git-upload-pack\n");
+
+    let (flush, input) = pkt_line(input)?;
+    ensure!(flush == "0000");
+
+    let (mut input, next) = pkt_line(input)?;
+    if input.starts_with(b"version".as_slice()) {
+        tracing::debug!(version_line = ?input);
+        input = next;
+    }
+
+    if input == "0000" {
+        return Ok(None);
+    }
+
+    tracing::debug!(first_item = ?input);
+
+    let _obj_id = input.split_to(40);
+    let _sp = input.split_to(1);
+    let nul_pos = input.partition_point(|&c| c == 0);
+    let _name = input.split_to(nul_pos);
+    let lf_pos = input.partition_point(|&c| c == b'\n');
+    let cap_list = input.split_off(lf_pos);
+
+    for cap in cap_list
+        .split(|&c| c == b' ')
+        .map(|b| std::str::from_utf8(b))
+    {
+        if let Some(symref) = cap?.strip_prefix("symref=HEAD:") {
+            return Ok(Some(symref.to_string()));
+        }
+    }
+
+    Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::body::Bytes;
+
+    use super::parse_smart_refs;
+
+    #[test]
+    fn parse_info_refs_response() {
+        assert_eq!(
+            parse_smart_refs(Bytes::from_static(include_bytes!(
+                "../doc/example-info-refs-response"
+            )))
+            .unwrap(),
+            Some(String::from("refs/heads/master"))
+        );
+    }
+
+    #[test]
+    fn parse_info_refs_response_with_version() {
+        assert_eq!(
+            parse_smart_refs(Bytes::from_static(include_bytes!(
+                "../doc/example-info-refs-response-with-version"
+            )))
+            .unwrap(),
+            Some(String::from("refs/heads/master"))
+        );
+    }
+
+    #[test]
+    fn parse_empty_repo_info_refs_response() {
+        assert_eq!(
+            parse_smart_refs(Bytes::from_static(include_bytes!(
+                "../doc/example-empty-info-refs-response"
+            )))
+            .unwrap(),
+            None
+        );
+    }
 }
