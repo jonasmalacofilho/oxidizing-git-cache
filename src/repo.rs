@@ -1,6 +1,6 @@
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Context;
@@ -33,16 +33,24 @@ impl Index {
     }
 
     pub async fn open(&self, upstream: Uri) -> Result<Arc<Mutex<Repo>>> {
-        // FIXME: upstream must be sanitized:
-        // - upstreams that escape out of the cache-dir
-        // - upstreams that turn into subpaths of existing cached repos
-        // - upstreams that result in absolute-looking paths being feed into Path::join
+        let host = Path::new(upstream.host().ok_or(Error::NotFound)?);
+        let path = Path::new(&upstream.path()[1..]);
 
-        let local = self
-            .cache_dir
-            .join(upstream.host().ok_or(Error::NotFound)?)
-            .join(&upstream.path()[1..])
-            .with_extension("git");
+        // Guard against path traversal attacks, as well as any other "strange" path components
+        // that may cause issues.
+        let mut local = self.cache_dir.clone();
+        for part in [host, path] {
+            for comp in part.components() {
+                match comp {
+                    Component::Normal(c) => local.push(c),
+                    comp => {
+                        tracing::warn!(?host, ?path, "disallowed component present: {comp:?}");
+                        return Err(Error::NotFound);
+                    }
+                };
+            }
+        }
+        local.set_extension("git");
 
         let mut index = self.index.lock().await;
 
@@ -119,10 +127,40 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn path_sanitization() {
+        let cache_dir = tempdir().unwrap().into_path();
+
+        let mut mock_git = Git::default();
+        mock_git.expect_init().returning(|_| Ok(()));
+
+        let index = Index::new(cache_dir, mock_git);
+
+        assert!(index
+            .open(Uri::from_static("https://example.com//a/b"))
+            .await
+            .is_err());
+
+        assert!(index
+            .open(Uri::from_static("https://example.com/../a/b"))
+            .await
+            .is_err());
+
+        assert!(index
+            .open(Uri::from_static("https://example.com/a/../b"))
+            .await
+            .is_err());
+
+        assert!(index
+            .open(Uri::from_static("https://example.com/./a/b.git"))
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
     async fn mutual_exclusion() {
         let cache_dir = tempdir().unwrap().into_path();
-        let mut mock_git = Git::default();
 
+        let mut mock_git = Git::default();
         mock_git.expect_init().times(2).returning(|_| Ok(()));
 
         let index = Index::new(cache_dir, mock_git);
