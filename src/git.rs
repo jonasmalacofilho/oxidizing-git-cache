@@ -4,8 +4,10 @@ use std::process::{Output, Stdio};
 
 use anyhow::{anyhow, ensure, Context};
 use axum::body::Bytes;
-use axum::http::Uri;
-use reqwest::StatusCode;
+use axum::http::header::AUTHORIZATION;
+use axum::http::{HeaderMap, HeaderValue, Uri};
+use reqwest::header::WWW_AUTHENTICATE;
+use reqwest::{Client, StatusCode};
 use tokio::io::{AsyncRead, AsyncWriteExt};
 use tokio::process::Command;
 use tracing::{instrument, Instrument};
@@ -42,17 +44,39 @@ impl Git {
     }
 
     #[instrument(skip(self))]
-    pub async fn authenticate_with_head(&self, upstream: Uri) -> Result<Option<String>> {
-        // TODO: set up authentication
+    pub async fn authenticate_with_head(
+        &self,
+        upstream: Uri,
+        auth: Option<HeaderValue>,
+    ) -> Result<Option<String>> {
+        let mut extra_headers = HeaderMap::new();
 
-        let response = reqwest::get(format!("{upstream}/info/refs?service=git-upload-pack"))
+        if let Some(auth) = auth {
+            assert!(auth.is_sensitive());
+            extra_headers.insert(AUTHORIZATION, auth);
+        }
+
+        let response = Client::new()
+            .get(format!("{upstream}/info/refs?service=git-upload-pack"))
+            .headers(extra_headers)
+            .send()
             .await
             .context("failed to get upstream /info/refs")?;
 
         match response.status() {
             StatusCode::OK => { /* keep going */ }
-            StatusCode::NOT_FOUND | StatusCode::UNAUTHORIZED => return Err(Error::NotFound),
-            //StatusCode::UNAUTHORIZED => todo!(),
+            StatusCode::NOT_FOUND => return Err(Error::NotFound),
+            StatusCode::UNAUTHORIZED => {
+                let authenticate =
+                    response
+                        .headers()
+                        .get(WWW_AUTHENTICATE)
+                        .cloned()
+                        .ok_or(anyhow!(
+                    "missing WWW-Authenticate header for 401 Unauthorized response from upstream"
+                ))?;
+                return Err(Error::MissingAuth(authenticate));
+            }
             code => {
                 return Err(anyhow!("upstream responded to /info/refs with status {code}").into())
             }
@@ -70,10 +94,25 @@ impl Git {
     }
 
     #[instrument(skip(self))]
-    pub async fn fetch(&self, upstream: Uri, local: PathBuf) -> Result<()> {
-        // TODO: set up authentication
+    pub async fn fetch(
+        &self,
+        upstream: Uri,
+        local: PathBuf,
+        auth: Option<HeaderValue>,
+    ) -> Result<()> {
+        let mut command = Command::new("git");
 
-        let output = Command::new("git")
+        if let Some(auth) = auth {
+            assert!(auth.is_sensitive());
+
+            if let Ok(auth) = auth.to_str() {
+                command.env("AUTHORIZATION", format!("authorization: {auth}"));
+                command.arg("--config-env");
+                command.arg("http.extraHeader=AUTHORIZATION");
+            }
+        }
+
+        let output = command
             .arg("-C")
             .arg(local)
             .arg("fetch")

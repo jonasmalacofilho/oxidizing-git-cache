@@ -1,4 +1,8 @@
-use axum::{http::StatusCode, response::IntoResponse};
+use axum::{
+    http::{HeaderValue, StatusCode},
+    response::IntoResponse,
+};
+use reqwest::header::WWW_AUTHENTICATE;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -20,8 +24,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub enum Error {
     #[error("not found")]
     NotFound,
-    //#[error("bad request")]
-    //BadRequest,
+    #[error("not authenticated/authorized")]
+    MissingAuth(HeaderValue),
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -39,7 +43,9 @@ impl IntoResponse for Error {
                     .into_response()
             }
             Error::NotFound => StatusCode::NOT_FOUND.into_response(),
-            //Error::BadRequest => StatusCode::BAD_REQUEST.into_response(),
+            Error::MissingAuth(authenticate) => {
+                (StatusCode::UNAUTHORIZED, [(WWW_AUTHENTICATE, authenticate)]).into_response()
+            }
         }
     }
 }

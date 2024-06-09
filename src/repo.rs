@@ -4,8 +4,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Context;
-use axum::body::Bytes;
 use axum::http::Uri;
+use axum::{body::Bytes, http::HeaderValue};
 use tokio::fs;
 use tokio::sync::Mutex;
 
@@ -77,12 +77,21 @@ pub struct Repo {
 }
 
 impl Repo {
-    pub async fn authenticate_with_head(&self) -> Result<Option<String>> {
+    pub async fn authenticate_with_head(
+        &self,
+        auth: Option<HeaderValue>,
+    ) -> Result<Option<String>> {
         // Assume we (the server) has a modern git that supports symrefs.
-        self.git.authenticate_with_head(self.upstream.clone()).await
+        self.git
+            .authenticate_with_head(self.upstream.clone(), auth)
+            .await
     }
 
-    pub async fn fetch(&mut self, remote_head: Option<String>) -> Result<()> {
+    pub async fn fetch(
+        &mut self,
+        remote_head: Option<String>,
+        auth: Option<HeaderValue>,
+    ) -> Result<()> {
         if let Some(remote_head) = remote_head {
             tokio::fs::write(self.local.join("HEAD"), format!("ref: {remote_head}"))
                 .await
@@ -90,7 +99,7 @@ impl Repo {
         }
 
         self.git
-            .fetch(self.upstream.clone(), self.local.clone())
+            .fetch(self.upstream.clone(), self.local.clone(), auth)
             .await
     }
 
