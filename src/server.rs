@@ -70,51 +70,52 @@ async fn app(options: &Options, git: Git) -> io::Result<Router> {
     let index = Index::new(options.cache_dir.clone(), git);
 
     // TODO: delegate more to the axum router
-    Ok(Router::new()
+    let router = Router::new()
         .route("/*req", any(router))
-        .with_state(Arc::new(index))
-        .layer(
-            ServiceBuilder::new()
-                // WARN: Will *not* overwrite `x-request-id` if already present.
-                .set_x_request_id(MakeRequestUuid)
-                .layer(SetSensitiveRequestHeadersLayer::new(once(
-                    header::AUTHORIZATION,
-                )))
-                .layer(
-                    TraceLayer::new_for_http()
-                        .make_span_with(|request: &Request<_>| {
-                            let request_id = request
-                                .extensions()
-                                .get::<RequestId>()
-                                .unwrap()
-                                .header_value();
-                            tracing::info_span!("request", ?request_id)
-                        })
-                        .on_request(|request: &Request<_>, _: &Span| {
-                            tracing::info!(
-                                headers = ?request.headers(),
-                                "received {} {} {:?}",
-                                request.method(),
-                                request.uri(),
-                                request.version(),
-                            )
-                        })
-                        .on_response(|response: &Response<_>, latency: Duration, _: &Span| {
-                            tracing::info!(
-                                ?latency,
-                                headers = ?response.headers(),
-                                "done with status {}",
-                                response.status(),
-                            )
-                        }),
-                )
-                .layer(RequestDecompressionLayer::new())
-                .propagate_x_request_id()
-                .layer(SetResponseHeaderLayer::overriding(
-                    header::SERVER,
-                    HeaderValue::from_static(APP_NAME),
-                )),
-        ))
+        .with_state(Arc::new(index));
+
+    let trace_layer = TraceLayer::new_for_http()
+        .make_span_with(|request: &Request<_>| {
+            let request_id = request
+                .extensions()
+                .get::<RequestId>()
+                .unwrap()
+                .header_value();
+            tracing::info_span!("request", ?request_id)
+        })
+        .on_request(|request: &Request<_>, _: &Span| {
+            tracing::info!(
+                headers = ?request.headers(),
+                "received {} {} {:?}",
+                request.method(),
+                request.uri(),
+                request.version(),
+            )
+        })
+        .on_response(|response: &Response<_>, latency: Duration, _: &Span| {
+            tracing::info!(
+                ?latency,
+                headers = ?response.headers(),
+                "done with status {}",
+                response.status(),
+            )
+        });
+
+    let middleware = ServiceBuilder::new()
+        // WARN: Will *not* overwrite `x-request-id` if already present.
+        .set_x_request_id(MakeRequestUuid)
+        .layer(SetSensitiveRequestHeadersLayer::new(once(
+            header::AUTHORIZATION,
+        )))
+        .layer(trace_layer)
+        .layer(RequestDecompressionLayer::new())
+        .propagate_x_request_id()
+        .layer(SetResponseHeaderLayer::overriding(
+            header::SERVER,
+            HeaderValue::from_static(APP_NAME),
+        ));
+
+    Ok(router.layer(middleware))
 }
 
 async fn router(State(repos): State<Arc<Index>>, request: Request<Body>) -> Result<Response> {
