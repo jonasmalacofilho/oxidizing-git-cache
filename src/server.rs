@@ -2,18 +2,18 @@ use std::io;
 use std::iter::once;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
 use axum::body::Body;
 use axum::extract::{Request, State};
-use axum::http::header::AUTHORIZATION;
-use axum::http::{Method, StatusCode, Uri};
+use axum::http::header;
+use axum::http::{HeaderValue, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
 use axum::Router;
 use clap::Parser;
 use http_body_util::BodyExt;
-use reqwest::header;
 use tokio::fs;
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
@@ -21,10 +21,12 @@ use tokio::sync::Mutex;
 use tokio_util::io::ReaderStream;
 use tower::ServiceBuilder;
 use tower_http::decompression::RequestDecompressionLayer;
-use tower_http::request_id::MakeRequestUuid;
+use tower_http::request_id::{MakeRequestUuid, RequestId};
 use tower_http::sensitive_headers::SetSensitiveRequestHeadersLayer;
-use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
+use tower_http::set_header::SetResponseHeaderLayer;
+use tower_http::trace::TraceLayer;
 use tower_http::ServiceBuilderExt;
+use tracing::Span;
 
 use crate::error::{Error, Result};
 use crate::repo::{Index, Repo};
@@ -33,6 +35,7 @@ use crate::repo::{Index, Repo};
 use crate::git::Git;
 #[cfg(test)]
 use crate::git::MockGit as Git;
+use crate::APP_NAME;
 
 /// A caching Git HTTP server.
 ///
@@ -74,21 +77,48 @@ async fn app(options: &Options, git: Git) -> io::Result<Router> {
             ServiceBuilder::new()
                 // WARN: Will *not* overwrite `x-request-id` if already present.
                 .set_x_request_id(MakeRequestUuid)
-                .layer(SetSensitiveRequestHeadersLayer::new(once(AUTHORIZATION)))
+                .layer(SetSensitiveRequestHeadersLayer::new(once(
+                    header::AUTHORIZATION,
+                )))
                 .layer(
                     TraceLayer::new_for_http()
-                        .make_span_with(DefaultMakeSpan::new().include_headers(true))
-                        .on_response(DefaultOnResponse::new().include_headers(true)),
+                        .make_span_with(|request: &Request<_>| {
+                            let request_id = request
+                                .extensions()
+                                .get::<RequestId>()
+                                .unwrap()
+                                .header_value();
+                            tracing::info_span!("request", ?request_id)
+                        })
+                        .on_request(|request: &Request<_>, _: &Span| {
+                            tracing::info!(
+                                headers = ?request.headers(),
+                                "received {} {} {:?}",
+                                request.method(),
+                                request.uri(),
+                                request.version(),
+                            )
+                        })
+                        .on_response(|response: &Response<_>, latency: Duration, _: &Span| {
+                            tracing::info!(
+                                ?latency,
+                                headers = ?response.headers(),
+                                "done with status {}",
+                                response.status(),
+                            )
+                        }),
                 )
                 .layer(RequestDecompressionLayer::new())
-                .propagate_x_request_id(),
+                .propagate_x_request_id()
+                .layer(SetResponseHeaderLayer::overriding(
+                    header::SERVER,
+                    HeaderValue::from_static(APP_NAME),
+                )),
         ))
 }
 
 async fn router(State(repos): State<Arc<Index>>, request: Request<Body>) -> Result<Response> {
     if request.method() == Method::GET {
-        // "Smart" protocol client step 1: ref discovery.
-
         if request.uri().query() != Some("service=git-upload-pack") {
             return Err(Error::NotFound);
         }
@@ -105,8 +135,6 @@ async fn router(State(repos): State<Arc<Index>>, request: Request<Body>) -> Resu
         let repo = repos.open(upstream).await?;
         handle_ref_discovery(repo, request).await
     } else if request.method() == Method::POST {
-        // "Smart" protocol client step 2: compute.
-
         let upstream = request
             .uri()
             .path()
@@ -123,6 +151,7 @@ async fn router(State(repos): State<Arc<Index>>, request: Request<Body>) -> Resu
     }
 }
 
+// "Smart" protocol client step 1: ref discovery.
 async fn handle_ref_discovery(repo: Arc<Mutex<Repo>>, request: Request) -> Result<Response> {
     // FIXME: should only drop this guard after child git-upload-pack exits.
     let mut repo = repo.lock().await;
@@ -135,7 +164,11 @@ async fn handle_ref_discovery(repo: Arc<Mutex<Repo>>, request: Request) -> Resul
     repo.fetch(remote_head, auth).await?;
 
     // Advertise refs to client.
-    // TODO: add `000dversion 1` if request contains `Git-Protocol: version=1`.
+    //
+    // According to the specs (see `gitprotocol-http(5)`), if the request includes the
+    // `Git-Protocol: version=1` header an extra PKT_LINE `000dversion 1` shoule be inserted before
+    // the first ref. However, GitHub doesn't implement that, and neither do we: it should just
+    // look like we only support version 1, which is true.
     let stdout = repo.advertise_refs()?;
     let output = b"001e# service=git-upload-pack\n0000".chain(stdout);
     let output = ReaderStream::new(output);
@@ -143,16 +176,17 @@ async fn handle_ref_discovery(repo: Arc<Mutex<Repo>>, request: Request) -> Resul
         StatusCode::OK,
         [
             (
-                "content-type",
+                header::CONTENT_TYPE,
                 "application/x-git-upload-pack-advertisement",
             ),
-            ("cache-control", "no-cache"),
+            (header::CACHE_CONTROL, "no-cache"),
         ],
         Body::from_stream(output),
     )
         .into_response())
 }
 
+// "Smart" protocol client step 2: compute.
 async fn handle_upload_pack(repo: Arc<Mutex<Repo>>, request: Request) -> Result<Response> {
     // FIXME: should only drop this guard after child git-upload-pack exits.
     let repo = repo.lock().await;
@@ -180,8 +214,8 @@ async fn handle_upload_pack(repo: Arc<Mutex<Repo>>, request: Request) -> Result<
     Ok((
         StatusCode::OK,
         [
-            ("content-type", "application/x-git-upload-pack-result"),
-            ("cache-control", "no-cache"),
+            (header::CONTENT_TYPE, "application/x-git-upload-pack-result"),
+            (header::CACHE_CONTROL, "no-cache"),
         ],
         Body::from_stream(output),
     )
@@ -192,14 +226,10 @@ async fn handle_upload_pack(repo: Arc<Mutex<Repo>>, request: Request) -> Result<
 mod tests {
     use std::io::Write;
 
-    use axum::{
-        body::Bytes,
-        http::{header, HeaderValue},
-    };
+    use axum::body::Bytes;
     use flate2::{write::GzEncoder, Compression};
     use http_body_util::BodyExt;
     use mockall::predicate::eq;
-    use reqwest::header::WWW_AUTHENTICATE;
     use tempfile::tempdir;
     use tower::{Service, ServiceExt};
 
@@ -212,7 +242,6 @@ mod tests {
             port: 0,
         };
 
-        // TODO: check sequence of git ops?
         let mut mock_git = Git::default();
 
         mock_git
@@ -257,12 +286,17 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
 
         assert_eq!(
-            Vec::from_iter(response.headers().get_all("content-type").into_iter()),
+            Vec::from_iter(response.headers().get_all(header::CONTENT_TYPE).into_iter()),
             ["application/x-git-upload-pack-advertisement"]
         );
 
         assert_eq!(
-            Vec::from_iter(response.headers().get_all("cache-control").into_iter()),
+            Vec::from_iter(
+                response
+                    .headers()
+                    .get_all(header::CACHE_CONTROL)
+                    .into_iter()
+            ),
             ["no-cache"]
         );
 
@@ -288,7 +322,6 @@ mod tests {
             port: 0,
         };
 
-        // TODO: check sequence of git ops?
         let mut mock_git = Git::default();
 
         mock_git.expect_init().times(1).returning(|_| Ok(()));
@@ -338,7 +371,6 @@ mod tests {
             port: 0,
         };
 
-        // TODO: check sequence of git ops?
         let mut mock_git = Git::default();
 
         mock_git.expect_init().times(1).returning(|_| Ok(()));
@@ -372,12 +404,17 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
 
         assert_eq!(
-            Vec::from_iter(response.headers().get_all("content-type").into_iter()),
+            Vec::from_iter(response.headers().get_all(header::CONTENT_TYPE).into_iter()),
             ["application/x-git-upload-pack-result"]
         );
 
         assert_eq!(
-            Vec::from_iter(response.headers().get_all("cache-control").into_iter()),
+            Vec::from_iter(
+                response
+                    .headers()
+                    .get_all(header::CACHE_CONTROL)
+                    .into_iter()
+            ),
             ["no-cache"]
         );
 
@@ -396,7 +433,6 @@ mod tests {
             port: 0,
         };
 
-        // TODO: check sequence of git ops?
         let mut mock_git = Git::default();
 
         mock_git.expect_init().times(1).returning(|_| Ok(()));
@@ -483,7 +519,7 @@ mod tests {
         let refs = app
             .call(
                 Request::get("/example.com/a/b/c/info/refs?service=git-upload-pack")
-                    .header(AUTHORIZATION, "mock auth")
+                    .header(header::AUTHORIZATION, "mock auth")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -493,7 +529,7 @@ mod tests {
         let upload_pack = app
             .oneshot(
                 Request::post("/example.com/a/b/c/git-upload-pack")
-                    .header(AUTHORIZATION, "mock auth")
+                    .header(header::AUTHORIZATION, "mock auth")
                     .body(Body::from("mock client input: 42"))
                     .unwrap(),
             )
@@ -584,13 +620,18 @@ mod tests {
 
         assert_eq!(refs.status(), StatusCode::UNAUTHORIZED);
         assert_eq!(
-            Vec::from_iter(refs.headers().get_all(WWW_AUTHENTICATE).into_iter()),
+            Vec::from_iter(refs.headers().get_all(header::WWW_AUTHENTICATE).into_iter()),
             ["mock authenticate"]
         );
 
         assert_eq!(upload_pack.status(), StatusCode::UNAUTHORIZED);
         assert_eq!(
-            Vec::from_iter(upload_pack.headers().get_all(WWW_AUTHENTICATE).into_iter()),
+            Vec::from_iter(
+                upload_pack
+                    .headers()
+                    .get_all(header::WWW_AUTHENTICATE)
+                    .into_iter()
+            ),
             ["mock authenticate"]
         );
     }

@@ -26,6 +26,7 @@ pub enum Error {
     NotFound,
     #[error("not authenticated/authorized")]
     MissingAuth(HeaderValue),
+    // TODO: refuse upstream not in allowlist
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -34,7 +35,7 @@ impl IntoResponse for Error {
     fn into_response(self) -> axum::response::Response {
         match self {
             Error::Other(err) => {
-                // TODO: supporting logging the backtrace as well
+                // TODO: log the backtrace as well
                 tracing::error!(error = format_args!("{:#?}", err), "internal server error");
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,

@@ -4,15 +4,15 @@ use std::process::{Output, Stdio};
 
 use anyhow::{anyhow, ensure, Context};
 use axum::body::Bytes;
-use axum::http::header::AUTHORIZATION;
+use axum::http::header;
 use axum::http::{HeaderMap, HeaderValue, Uri};
-use reqwest::header::WWW_AUTHENTICATE;
 use reqwest::{Client, StatusCode};
 use tokio::io::{AsyncRead, AsyncWriteExt};
 use tokio::process::Command;
 use tracing::{instrument, Instrument};
 
 use crate::error::{Error, Result};
+use crate::APP_NAME;
 
 #[cfg(test)]
 use mockall::automock;
@@ -53,10 +53,13 @@ impl Git {
 
         if let Some(auth) = auth {
             assert!(auth.is_sensitive());
-            extra_headers.insert(AUTHORIZATION, auth);
+            extra_headers.insert(header::AUTHORIZATION, auth);
         }
 
-        let response = Client::new()
+        let response = Client::builder()
+            .user_agent(APP_NAME)
+            .build()
+            .expect("failed to build reqwest client")
             .get(format!("{upstream}/info/refs?service=git-upload-pack"))
             .headers(extra_headers)
             .send()
@@ -67,12 +70,11 @@ impl Git {
             StatusCode::OK => { /* keep going */ }
             StatusCode::NOT_FOUND => return Err(Error::NotFound),
             StatusCode::UNAUTHORIZED => {
-                let authenticate =
-                    response
-                        .headers()
-                        .get(WWW_AUTHENTICATE)
-                        .cloned()
-                        .ok_or(anyhow!(
+                let authenticate = response
+                    .headers()
+                    .get(header::WWW_AUTHENTICATE)
+                    .cloned()
+                    .ok_or(anyhow!(
                     "missing WWW-Authenticate header for 401 Unauthorized response from upstream"
                 ))?;
                 return Err(Error::MissingAuth(authenticate));
@@ -109,6 +111,8 @@ impl Git {
                 command.env("AUTHORIZATION", format!("authorization: {auth}"));
                 command.arg("--config-env");
                 command.arg("http.extraHeader=AUTHORIZATION");
+            } else {
+                // TODO: report error, since we don't support this case
             }
         }
 
@@ -279,8 +283,9 @@ fn parse_smart_refs(input: Bytes) -> anyhow::Result<Option<String>> {
         return Ok(None);
     }
 
-    tracing::debug!(first_item = ?input);
+    tracing::debug!(first_ref_list_item = ?input);
 
+    // FIXME: simplify and review corner cases
     let _obj_id = input.split_to(40);
     let _sp = input.split_to(1);
     let nul_pos = input.partition_point(|&c| c == 0);
