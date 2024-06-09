@@ -8,9 +8,8 @@ use git_cache_http_server::server::{start, Options};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // The default logging/tracing level is `INFO`. Note that `tracing_journald`, if in use, would
-    // translate `Level::INFO` to syslog `Notice`; syslog `Informational` would require
-    // `Level::DEBUG`.
+    // Note that if `tracing_journald` is added, it will translate `Level::INFO` to syslog priority
+    // `Notice`; priority `Informational` would require `Level::DEBUG`.
     tracing_subscriber::fmt::fmt()
         .with_env_filter(
             EnvFilter::try_from_env("GIT_CACHE_LOG").unwrap_or_else(|_| EnvFilter::new("info")),
