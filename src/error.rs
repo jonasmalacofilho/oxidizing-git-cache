@@ -26,7 +26,6 @@ pub enum Error {
     NotFound,
     #[error("not authenticated/authorized")]
     MissingAuth(HeaderValue),
-    // TODO: refuse upstream not in allowlist
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }

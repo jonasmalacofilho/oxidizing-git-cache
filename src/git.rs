@@ -84,7 +84,7 @@ impl Git {
             }
         };
 
-        // TODO: check content-type, we only support smart responses
+        // FIXME: check content-type, we only support smart responses
 
         let response = response
             .bytes()
@@ -112,7 +112,7 @@ impl Git {
                 command.arg("--config-env");
                 command.arg("http.extraHeader=AUTHORIZATION");
             } else {
-                // TODO: report error, since we don't support this case
+                // FIXME: report error, since we don't support this case
             }
         }
 

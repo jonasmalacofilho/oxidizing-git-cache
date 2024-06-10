@@ -173,6 +173,7 @@ async fn handle_ref_discovery(repo: Arc<Mutex<Repo>>, request: Request) -> Resul
     let stdout = repo.advertise_refs()?;
     let output = b"001e# service=git-upload-pack\n0000".chain(stdout);
     let output = ReaderStream::new(output);
+
     Ok((
         StatusCode::OK,
         [
@@ -212,6 +213,7 @@ async fn handle_upload_pack(repo: Arc<Mutex<Repo>>, request: Request) -> Result<
         .to_bytes();
     let output = repo.upload_pack(input).await?;
     let output = ReaderStream::new(output);
+
     Ok((
         StatusCode::OK,
         [
@@ -550,7 +552,7 @@ mod tests {
 
         let mut mock_git = Git::default();
 
-        // TODO: don't initialize a local repo for non-existent upstreams
+        // FIXME: don't initialize a local repo for non-existent upstreams
         mock_git.expect_init().times(0..).returning(|_| Ok(()));
 
         mock_git
@@ -590,7 +592,7 @@ mod tests {
 
         let mut mock_git = Git::default();
 
-        // TODO: don't initialize a local repo before upstream authorizes the client
+        // FIXME: don't initialize a local repo before upstream authorizes the client
         mock_git.expect_init().times(0..).returning(|_| Ok(()));
 
         mock_git.expect_authenticate_with_head().returning(|_, _| {
@@ -636,6 +638,4 @@ mod tests {
             ["mock authenticate"]
         );
     }
-
-    // TODO: support or at least don't break with git protocol v2
 }
