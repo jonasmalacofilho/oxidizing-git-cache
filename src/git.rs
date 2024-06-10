@@ -2,7 +2,7 @@ use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
 use std::process::{Output, Stdio};
 
-use anyhow::{anyhow, ensure, Context};
+use anyhow::{anyhow, bail, Context};
 use axum::body::Bytes;
 use axum::http::header;
 use axum::http::{HeaderMap, HeaderValue, Uri};
@@ -265,48 +265,34 @@ fn exited_ok_with_stdout(
 }
 
 fn parse_smart_refs(input: Bytes) -> anyhow::Result<Option<String>> {
-    fn pkt_line(mut input: Bytes) -> anyhow::Result<(Bytes, Bytes)> {
-        let pkt_len = input.split_to(4);
-        if pkt_len == "0000" {
-            Ok((pkt_len, input))
-        } else {
-            // FIXME: subsctraction can overflow and panic/wraparound
-            let pkt_len = u16::from_str_radix(std::str::from_utf8(&pkt_len)?, 16)? - 4;
-            Ok((input.split_to(pkt_len.into()), input))
-        }
+    let input = std::str::from_utf8(&input)?;
+
+    let Some((header, ref_list)) = input.split_once("0000") else {
+        bail!("missing flush packet");
+    };
+
+    if header.contains("version 2") {
+        bail!("smart protocol v2 is not supported");
     }
 
-    let (header, input) = pkt_line(input)?;
-    ensure!(header == "# service=git-upload-pack\n");
-
-    let (flush, input) = pkt_line(input)?;
-    ensure!(flush == "0000");
-
-    let (mut input, next) = pkt_line(input)?;
-    if input.starts_with(b"version".as_slice()) {
-        tracing::debug!(version_line = ?input);
-        input = next;
-    }
-
-    if input == "0000" {
+    // Some upstrams (e.g. GitHub) return no ref-list istead of the "empty" ref-list with a single
+    // zero-id entry.
+    if ref_list == "0000" {
         return Ok(None);
     }
 
-    tracing::debug!(first_ref_list_item = ?input);
+    let Some((first_item, _)) = ref_list.split_once('\n') else {
+        bail!("ref-list should be LF separated");
+    };
 
-    // FIXME: simplify and review corner cases
-    let _obj_id = input.split_to(40);
-    let _sp = input.split_to(1);
-    let nul_pos = input.partition_point(|&c| c == 0);
-    let _name = input.split_to(nul_pos);
-    let lf_pos = input.partition_point(|&c| c == b'\n');
-    let cap_list = input.split_off(lf_pos);
+    tracing::debug!(first_item);
 
-    for cap in cap_list
-        .split(|&c| c == b' ')
-        .map(|b| std::str::from_utf8(b))
-    {
-        if let Some(symref) = cap?.strip_prefix("symref=HEAD:") {
+    let Some((_, caps)) = first_item.split_once('\0') else {
+        bail!("first ref-list should include capabilites aftern NUL");
+    };
+
+    for cap in caps.split(' ') {
+        if let Some(symref) = cap.strip_prefix("symref=HEAD:") {
             return Ok(Some(symref.to_string()));
         }
     }
