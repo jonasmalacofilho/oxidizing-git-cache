@@ -24,6 +24,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub enum Error {
     #[error("not found")]
     NotFound,
+    #[error("client error: {0}")]
+    BadRequest(&'static str),
     #[error("not authenticated/authorized")]
     MissingAuth(HeaderValue),
     #[error(transparent)]
@@ -33,18 +35,25 @@ pub enum Error {
 impl IntoResponse for Error {
     fn into_response(self) -> axum::response::Response {
         match self {
+            Error::NotFound => StatusCode::NOT_FOUND.into_response(),
+            Error::BadRequest(message) => {
+                tracing::error!(client_error = message);
+                (StatusCode::BAD_REQUEST, message).into_response()
+            }
+            Error::MissingAuth(authenticate) => {
+                (StatusCode::UNAUTHORIZED, [(WWW_AUTHENTICATE, authenticate)]).into_response()
+            }
             Error::Other(err) => {
                 // TODO: log the backtrace as well
-                tracing::error!(error = format_args!("{:#?}", err), "internal server error");
+                tracing::error!(
+                    server_error = format_args!("{:#?}", err),
+                    "internal server error"
+                );
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "sorry, something went terrible wrong here",
                 )
                     .into_response()
-            }
-            Error::NotFound => StatusCode::NOT_FOUND.into_response(),
-            Error::MissingAuth(authenticate) => {
-                (StatusCode::UNAUTHORIZED, [(WWW_AUTHENTICATE, authenticate)]).into_response()
             }
         }
     }
