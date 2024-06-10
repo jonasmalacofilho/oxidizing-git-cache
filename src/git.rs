@@ -84,7 +84,16 @@ impl Git {
             }
         };
 
-        // FIXME: check content-type, we only support smart responses
+        let content_type = response.headers().get(header::CONTENT_TYPE);
+        if !matches!(
+            content_type,
+            Some(v) if v == "application/x-git-upload-pack-advertisement"
+        ) {
+            return Err(anyhow!(
+                "upstream response content-type doesn't match smart v1 protocol: {content_type:?}"
+            )
+            .into());
+        }
 
         let response = response
             .bytes()
