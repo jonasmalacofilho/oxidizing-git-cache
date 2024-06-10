@@ -64,7 +64,7 @@ impl Git {
             .headers(extra_headers)
             .send()
             .await
-            .context("failed to get upstream /info/refs")?;
+            .context("failed to reach upstream for /info/refs")?;
 
         match response.status() {
             StatusCode::OK => { /* keep going */ }
@@ -121,7 +121,9 @@ impl Git {
                 command.arg("--config-env");
                 command.arg("http.extraHeader=AUTHORIZATION");
             } else {
-                // FIXME: report error, since we don't support this case
+                return Err(Error::BadRequest(
+                    "authorization header should contain only visible ASCII chars",
+                ));
             }
         }
 
